@@ -1,0 +1,3 @@
+# Vendored PDF.js files are third-party distributions; preserve their exact bytes.
+# Their original whitespace is not treated as a source-code formatting issue.
+dist/vendor/pdfjs/** -whitespace

@@ -1,0 +1,108 @@
+/** Read-only asset forecast: no remote writes, guessed debit accounts, or future salary estimates. */
+import { ASSET_ACCOUNTS, latestBalance, type AssetAccountId, type AssetsDocument, type BalanceSnapshot, type RecurringEntry } from './assets.js';
+import type { CloudRecord } from './merge.js';
+import { depositedIncomeBetween, type PayrollIncomeEntry } from './payroll-income.js';
+
+export interface AccountForecast {
+  accountId:AssetAccountId;
+  baseline:BalanceSnapshot|null;
+  balance:number|null;
+  recurringDelta:number;
+  cardNisaDelta:number;
+  payrollDelta:number;
+  forecastEvents:number;
+  warning:string|null;
+}
+export type AssetForecast = Record<AssetAccountId,AccountForecast>;
+function dayString(date:Date):string {
+  const y=date.getFullYear(),m=String(date.getMonth()+1).padStart(2,'0'),d=String(date.getDate()).padStart(2,'0');
+  return `${y}-${m}-${d}`;
+}
+export function localDay(date:Date):string {return dayString(date);}
+export function lastDayOfNextMonth(date:Date):string {
+  return dayString(new Date(date.getFullYear(),date.getMonth()+2,0));
+}
+function validDay(day:string):boolean {
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(day))return false;
+  const date=new Date(`${day}T00:00:00Z`);
+  return !Number.isNaN(date.getTime())&&date.toISOString().slice(0,10)===day;
+}
+function snapshotDay(s:BalanceSnapshot):string {return dayString(new Date(s.observedAt));}
+function occurrence(entry:RecurringEntry,day:string):boolean {
+  if(!entry.enabled||day<entry.startOn||(entry.endOn!==null&&day>entry.endOn))return false;
+  const yy=Number(day.slice(0,4)),mm=Number(day.slice(5,7)),dd=Number(day.slice(8,10));
+  if(entry.frequency==='weekly')return new Date(`${day}T00:00:00Z`).getUTCDay()===entry.weekday;
+  if(entry.frequency==='yearly'&&mm!==entry.monthOfYear)return false;
+  const last=new Date(Date.UTC(yy,mm,0)).getUTCDate();
+  return dd===(entry.dayOfMonth===0?last:Math.min(entry.dayOfMonth!,last));
+}
+function accountDelta(entry:RecurringEntry,account:AssetAccountId):number {
+  if(entry.fromAccountId===account)return -entry.amount;
+  if(entry.toAccountId===account)return entry.amount;
+  return 0;
+}
+export function matchingNisaRows(doc:AssetsDocument,records:CloudRecord[]):Array<{date:string;amount:number;recordId:string;rowId:string}>{
+  const rule=doc.nisaCardRule;
+  if(!rule?.enabled)return [];
+  const term=rule.merchantContains.normalize('NFKC').toLocaleLowerCase();
+  const seen=new Set<string>();
+  const matches:Array<{date:string;amount:number;recordId:string;rowId:string}>=[];
+  for(const record of records){
+    if(record.statement.cardId!==rule.cardId)continue;
+    for(const row of record.statement.rows){
+      const date=row.usedOn;
+      if(!validDay(date)||!Number.isSafeInteger(row.amount)||row.amount<=0||
+         !row.merchant.normalize('NFKC').toLocaleLowerCase().includes(term))continue;
+      const id=`${record.id}:${row.id}`;
+      if(seen.has(id))continue;seen.add(id);
+      matches.push({date,amount:row.amount,recordId:record.id,rowId:row.id});
+    }
+  }
+  return matches;
+}
+/**
+ * Project from the latest snapshot on/before the target date.
+ * All events on a snapshot's calendar day are excluded, because a manually
+ * confirmed balance may already include them. Future entries are included up
+ * to and including the selected target date. Card rows are never bank debits.
+ */
+export function forecastAssets(
+  doc:AssetsDocument,asOf:string,records:CloudRecord[]=[],
+  payrollIncome:PayrollIncomeEntry[]=[],payrollDepositAccount:AssetAccountId|null=null,
+):AssetForecast {
+  if(!validDay(asOf))throw new Error('予測対象日が不正です。');
+  const cardRows=matchingNisaRows(doc,records);
+  const result={} as AssetForecast;
+  for(const account of ASSET_ACCOUNTS){
+    const found=doc.snapshots.filter(s=>s.accountId===account.id&&snapshotDay(s)<=asOf);
+    found.sort((a,b)=>b.observedAt.localeCompare(a.observedAt)||b.id.localeCompare(a.id));
+    const baseline=found[0]??null;
+    if(!baseline){result[account.id]={accountId:account.id,baseline:null,balance:null,recurringDelta:0,cardNisaDelta:0,payrollDelta:0,forecastEvents:0,warning:'基準残高を登録してください。'};continue;}
+    const start=snapshotDay(baseline);
+    const from=Date.parse(`${start}T00:00:00Z`),to=Date.parse(`${asOf}T00:00:00Z`);
+    if(!Number.isFinite(from)||!Number.isFinite(to)||to-from>366*10*86400000)
+      {result[account.id]={accountId:account.id,baseline,balance:null,recurringDelta:0,cardNisaDelta:0,payrollDelta:0,forecastEvents:0,warning:'基準残高が古いため、確認済み残高を更新してください。'};continue;}
+    let recurringDelta=0,forecastEvents=0;
+    // Iterate at most 3,660 days. Using UTC days keeps DST away from recurrence scheduling.
+    for(let t=from+86400000;t<=to;t+=86400000){
+      const day=new Date(t).toISOString().slice(0,10);
+      for(const entry of doc.recurring){
+        const delta=accountDelta(entry,account.id);
+        if(delta!==0&&occurrence(entry,day)){recurringDelta+=delta;forecastEvents++;}
+      }
+    }
+    let cardNisaDelta=0;
+    if(account.id==='nisa')for(const row of cardRows){
+      if(row.date>start&&row.date<=asOf)cardNisaDelta+=row.amount;
+    }
+    // Opt-in only. The producer must provide confirmed salary payments;
+    // never infer projected pay or the deposit account. No card debit here.
+    const payrollDelta=payrollDepositAccount===account.id
+      ?depositedIncomeBetween(payrollIncome,start,asOf):0;
+    const balance=baseline.balance+recurringDelta+cardNisaDelta+payrollDelta;
+    if(!Number.isSafeInteger(balance))throw new Error('残高予測の金額が上限を超えています。');
+    result[account.id]={accountId:account.id,baseline,balance,recurringDelta,cardNisaDelta,payrollDelta,forecastEvents,
+      warning:account.id==='nisa'?'評価額の変動は含まず、積立額のみを加算した参考値です。':null};
+  }
+  return result;
+}

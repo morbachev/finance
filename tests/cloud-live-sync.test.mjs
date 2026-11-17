@@ -1,0 +1,242 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { webcrypto } from 'node:crypto';
+import { LiveVault } from '../dist/src/cloud/live-vault.js';
+import { GraphError } from '../dist/src/cloud/onedrive-api.js';
+import { emptyDocument } from '../dist/src/cloud/merge.js';
+import { encryptDocument, deriveCloudKey, freshSalt } from '../dist/src/cloud/cloud-crypto.js';
+
+if(!globalThis.crypto)globalThis.crypto=webcrypto;
+const secret='password-of-test-12345';
+const statement=(month='2026-11', merchant='base')=>({provider:'rakuten',cardId:'rakuten-mizuho',sourceKind:'paste',sourceName:'web',billingMonth:month,paymentDate:null,statedTotal:100,confirmation:'confirmed',warnings:[],rows:[{id:'r',usedOn:'2026-11-01',merchant,amount:100}]});
+
+class MockGraph {
+  constructor(store){this.store=store;this.failYear=null;this.failIndex=false;this.calls=[];}
+  file(kind,key){return this.store.files.get(`${kind}:${key}`)??null;}
+  read(kind,key){const data=this.file(kind,key);if(kind==='year')this.calls.push(`read:${key}`);return data?{text:data.text,id:`${kind}-${key}`,etag:`"${data.revision}"`}:null;}
+  write(kind,key,text,ref){
+    const old=this.file(kind,key);
+    if(ref?(!old||ref.etag!==`"${old.revision}"`):!!old)throw new GraphError(412,'etagMismatch');
+    const revision=(old?.revision??0)+1;this.store.files.set(`${kind}:${key}`,{text,revision});
+    this.calls.push(`${kind}:${key}`);
+  }
+  async readFinanceIndex(){return this.read('index','finance');}
+  async writeFinanceIndex(text,ref){if(this.failIndex)throw new Error('simulated index outage');this.write('index','finance',text,ref);}
+  async listYearFiles(){return [...this.store.files.keys()].filter(x=>x.startsWith('year:')).map(x=>({year:x.slice(5),id:`year-${x.slice(5)}`,etag:`"${this.file('year',x.slice(5)).revision}"`}));}
+  async listYearBuckets(){return (await this.listYearFiles()).map(x=>x.year);}
+  async readYearVault(year){return this.read('year',year);}
+  async writeYearVault(year,text,ref){if(year===this.failYear)throw new Error('simulated year outage');this.write('year',year,text,ref);}
+  async readLiveVault(){return this.read('legacy','root');}
+  async writeLiveVault(text,ref){this.write('legacy','root',text,ref);}
+  async ensurePayrollNamespace(){this.store.payroll=true;}
+  async uploadDatedOriginal(id,text,month){const k=`${month??'undated'}:${id}`;if(this.store.originals.has(k))throw new GraphError(409,'nameAlreadyExists');this.store.originals.set(k,text);this.calls.push(`original:${k}`);}
+  async downloadDatedOriginal(id,month){const value=this.store.originals.get(`${month??'undated'}:${id}`);if(!value)throw new Error('missing dated PDF');return value;}
+  async uploadOriginal(id,text){this.store.legacyOriginals.set(id,text);}
+  async downloadOriginal(id){const value=this.store.legacyOriginals.get(id);if(!value)throw new Error('missing legacy PDF');return value;}
+}
+function drivers(){const store={files:new Map(),originals:new Map(),legacyOriginals:new Map(),payroll:false};const mock=new MockGraph(store);return [new LiveVault(mock),new LiveVault(mock),mock,store];}
+
+test('year-sharded vault creates encrypted index, and separate 2025/2026 files',async()=>{
+  const [a,,mock,store]=drivers();await a.create(secret);
+  assert.deepEqual([...store.files.keys()],['index:finance']);assert.equal(store.payroll,true);
+  await a.saveBatch([{id:'one',statement:statement('2025-10')},{id:'two',statement:statement('2026-11')}]);
+  assert.deepEqual([...store.files.keys()].sort(),['index:finance','year:2025','year:2026']);
+  assert.equal(a.records().length,2);
+  const newWrites=mock.calls.length;
+  await a.saveBatch([{id:'two',statement:{...statement('2026-11'),statedTotal:200}}]);
+  assert.ok(mock.calls.slice(newWrites).includes('year:2026'));
+  assert.ok(!mock.calls.slice(newWrites).includes('year:2025'),'editing 2026 must never rewrite 2025');
+  const [b]=[new LiveVault(mock)];await b.unlock(secret);
+  assert.deepEqual(b.records().map(r=>r.id).sort(),['one','two']);
+});
+
+test('two clients auto-merge independent changes in the same year and across years',async()=>{
+  const [a,b]=drivers();await a.create(secret);await b.unlock(secret);
+  await a.saveBatch([{id:'first',statement:statement('2026-10')}]);
+  await b.saveBatch([{id:'second',statement:statement('2026-11')}]);
+  await a.refresh();assert.deepEqual(a.records().map(r=>r.id).sort(),['first','second']);
+  await a.saveBatch([{id:'older',statement:statement('2025-01')}]);
+  await b.saveBatch([{id:'newer',statement:statement('2027-03')}]);
+  await a.refresh();assert.deepEqual(a.records().map(r=>r.id).sort(),['first','newer','older','second']);
+});
+
+test('same-year same-field conflict retains the losing value in encrypted audit',async()=>{
+  const [a,b]=drivers();await a.create(secret);
+  await a.saveBatch([{id:'one',statement:statement()}]);await b.unlock(secret);
+  const sa=a.records()[0].statement,sb=b.records()[0].statement;
+  sa.statedTotal=200;sb.statedTotal=300;
+  await a.saveBatch([{id:'one',statement:sa}]);await b.saveBatch([{id:'one',statement:sb}]);
+  await a.refresh();assert.equal(a.records()[0].statement.statedTotal,300);assert.equal(a.conflicts(),1);
+});
+
+test('PDF originals are under immutable bill-month folder, even after correcting billing month',async()=>{
+  const [a,,mock,store]=drivers();await a.create(secret);
+  const bytes=new Uint8Array([37,80,68,70,1,2,3,4]);
+  const pdf={...statement('2026-11'),sourceKind:'pdf'};
+  await a.saveBatch([{id:'pdf',statement:pdf,source:{bytes,mime:'application/pdf'}}]);
+  const files=[...store.originals.keys()];assert.equal(files.length,1);
+  assert.match(files[0],/^2026-11:/);
+  assert.deepEqual(await a.original('pdf'),bytes);
+  const changed=a.records()[0].statement;changed.billingMonth='2027-01';
+  await a.saveBatch([{id:'pdf',statement:changed}]);
+  assert.deepEqual(await a.original('pdf'),bytes);
+  assert.deepEqual(a.records().map(r=>r.statement.billingMonth),['2027-01']);
+  assert.equal(store.originals.size,1,'the immutable PDF should not move or reupload');
+  assert.equal(store.files.get('year:2026').text.includes('originalId'),false,'ciphertext must conceal metadata');
+  await a.refresh();assert.equal(a.records().length,1,'no duplicate record during year move');
+  assert.ok(mock.calls.includes('year:2027')&&mock.calls.includes('year:2026'));
+});
+
+test('deletions persist across stale clients without resurrection',async()=>{
+  const [a,b]=drivers();await a.create(secret);
+  await a.saveBatch([{id:'gone',statement:statement()}]);await b.unlock(secret);
+  await a.delete('gone');await b.saveBatch([{id:'other',statement:statement('2026-10')}]);
+  await a.refresh();assert.deepEqual(a.records().map(r=>r.id),['other']);
+});
+
+test('cloud upload outage does not acknowledge an uncommitted record',async()=>{
+  const [a,,mock]=drivers();await a.create(secret);
+  mock.failYear='2026';
+  await assert.rejects(a.saveBatch([{id:'new',statement:statement()}]),/outage/);
+  assert.equal(a.records().length,0);
+});
+
+test('unregistered year file is recovered on next unlock after index outage',async()=>{
+  const [a,,mock]=drivers();await a.create(secret);
+  mock.failIndex=true;
+  await assert.rejects(a.saveBatch([{id:'new',statement:statement('2026-11')}]),/index outage/);
+  assert.ok(mock.file('year','2026'),'encrypted shard was saved');
+  mock.failIndex=false;
+  const restarted=new LiveVault(mock);
+  await restarted.unlock(secret);
+  assert.deepEqual(restarted.records().map(x=>x.id),['new'],'orphan year discovered from folder listing');
+  await restarted.saveBatch([{id:'second',statement:statement('2026-10')}]);
+  assert.ok(mock.file('index','finance'));
+});
+
+test('legacy v1 single vault and PDF are migrated and verified, never deleted',async()=>{
+  const [a,,mock,store]=drivers();
+  const salt=freshSalt(),key=await deriveCloudKey(secret,salt),doc=emptyDocument();
+  const bytes=new Uint8Array([37,80,68,70,1]);
+  const {encryptOriginal}=await import('../dist/src/cloud/cloud-crypto.js');
+  const orig=await encryptOriginal(bytes,key);
+  const id='12345678-1234-1234-1234-123456789abc';
+  store.legacyOriginals.set(id,orig);
+  doc.records.push({id:'a',statement:statement('2025-12')},{id:'b',statement:{...statement('2026-11'),sourceKind:'pdf'},originalId:id});
+  doc.deleted.push('deleted-id');
+  await mock.writeLiveVault(await encryptDocument(doc,key,salt),null);
+  assert.equal(await a.discover(),true);assert.equal(a.needsLayoutMigration,true);
+  await a.unlock(secret);
+  assert.equal(a.needsLayoutMigration,false);
+  assert.deepEqual(a.records().map(x=>x.id).sort(),['a','b']);
+  assert.deepEqual(await a.original('b'),bytes);
+  assert.ok(mock.file('legacy','root'),'legacy v1 ciphertext must remain untouched');
+  assert.ok(mock.file('year','2025')&&mock.file('year','2026')&&mock.file('year','undated'));
+  assert.ok(mock.file('index','finance'),'manifest published only after all shards');
+  assert.ok(store.originals.has(`2026-11:${id}`));
+  const newClient=new LiveVault(mock);await newClient.unlock(secret);
+  assert.equal(newClient.records().length,2);
+});
+
+test('legacy migration retries after interruption without deleting old data',async()=>{
+  const [a,,mock]=drivers();
+  const salt=freshSalt(),key=await deriveCloudKey(secret,salt),doc=emptyDocument();
+  doc.records.push({id:'a',statement:statement('2025-12')},{id:'b',statement:statement('2026-11')});
+  await mock.writeLiveVault(await encryptDocument(doc,key,salt),null);
+  mock.failYear='2026';
+  await assert.rejects(a.unlock(secret),/year outage/);
+  assert.ok(mock.file('legacy','root'));assert.equal(mock.file('index','finance'),null);
+  mock.failYear=null;
+  await a.unlock(secret);assert.equal(a.records().length,2);
+});
+
+test('invalid passphrase never starts migration',async()=>{
+  const [a,,mock]=drivers();const salt=freshSalt(),key=await deriveCloudKey(secret,salt);
+  await mock.writeLiveVault(await encryptDocument(emptyDocument(),key,salt),null);
+  await assert.rejects(a.unlock('incorrect'),/パスフレーズ/);
+  assert.equal(mock.file('index','finance'),null);
+});
+
+test('unknown billing month is stored under undated shard rather than lost',async()=>{
+  const [a]=drivers();await a.create(secret);await a.saveBatch([{id:'bad-month',statement:statement(null)}]);
+  assert.equal(a.records()[0].id,'bad-month');
+});
+
+test('multi-year partial save retries with the same IDs and no duplicate records',async()=>{
+  const [a,,mock]=drivers();await a.create(secret);
+  const first=statement('2025-11'),second=statement('2026-11');
+  mock.failYear='2026';
+  await assert.rejects(a.saveBatch([{statement:first},{statement:second}]),/year outage/);
+  assert.equal(a.records().length,1,'one year committed, no false all-success state');
+  mock.failYear=null;
+  const ids=await a.saveBatch([{statement:first},{statement:second}]);
+  assert.equal(new Set(ids).size,2);
+  await a.refresh();
+  assert.deepEqual(a.records().map(x=>x.id).sort(),ids.sort());
+});
+
+test('refresh checks unchanged years with ETag and avoids their ciphertext downloads',async()=>{
+  const [a,,mock]=drivers();await a.create(secret);
+  await a.saveBatch([{id:'old',statement:statement('2025-12')},{id:'new',statement:statement('2026-11')}]);
+  mock.calls.length=0;
+  await a.saveBatch([{id:'new',statement:{...statement('2026-11'),statedTotal:200}}]);
+  assert.ok(mock.calls.includes('read:2026'));
+  assert.equal(mock.calls.includes('read:2025'),false,'2025 must only be checked by ETag, not downloaded');
+});
+
+test('committed ETag skips redundant read-back while preserving conflict merge and refresh',async()=>{
+  const [a,b,mock]=drivers();
+  // Emulate real Graph upload-session completion, which returns file ID and ETag.
+  mock.writeYearVault=async function(year,text,ref){
+    this.write('year',year,text,ref);
+    return {id:`year-${year}`,etag:`"${this.file('year',year).revision}"`};
+  };
+  await a.create(secret);
+  mock.calls.length=0;
+  await a.saveBatch([{id:'first',statement:statement('2026-11')}]);
+  assert.equal(mock.calls.filter(x=>x==='read:2026').length,1,'read remote once; no immediate read-back');
+  await b.unlock(secret);
+  await a.saveBatch([{id:'second',statement:statement('2026-10')}]);
+  await b.saveBatch([{id:'third',statement:statement('2026-09')}]);
+  await a.refresh();
+  assert.deepEqual(a.records().map(x=>x.id).sort(),['first','second','third']);
+});
+
+test('newly opened vault downloads annual shards concurrently, at most four at a time',async()=>{
+  const [a,,mock]=drivers();await a.create(secret);
+  const years=['2022','2023','2024','2025','2026','2027'];
+  await a.saveBatch(years.map(year=>({id:year,statement:statement(`${year}-11`)})));
+  const read=mock.readYearVault.bind(mock);
+  let active=0,peak=0;
+  mock.readYearVault=async year=>{
+    active++;peak=Math.max(active,peak);
+    try{await new Promise(resolve=>setTimeout(resolve,8));return read(year);}
+    finally{active--;}
+  };
+  const other=new LiveVault(mock);await other.unlock(secret);
+  assert.equal(other.records().length,6);
+  assert.equal(peak,4,'four annual shards should be in flight concurrently');
+});
+
+test('conditional 304 fast-path keeps all concurrent edits and tombstones',async()=>{
+  const [a,b,mock]=drivers();
+  mock.readYearVaultForSave=async function(year,ref){
+    const current=this.file('year',year);
+    if(current&&ref?.etag===`"${current.revision}"`)return {kind:'unchanged'};
+    return {kind:'remote',file:this.read('year',year)};
+  };
+  mock.writeYearVault=async function(year,text,ref){
+    this.write('year',year,text,ref);
+    return {id:`year-${year}`,etag:`"${this.file('year',year).revision}"`};
+  };
+  await a.create(secret);
+  await a.saveBatch([{id:'first',statement:statement()}]);
+  await b.unlock(secret);
+  mock.calls.length=0;
+  await a.saveBatch([{id:'second',statement:statement('2026-10')}]);
+  assert.equal(mock.calls.includes('read:2026'),false,'unchanged shard requires no ciphertext GET');
+  await b.saveBatch([{id:'third',statement:statement('2026-09')}]);
+  await a.delete('first');
+  await b.refresh();
+  assert.deepEqual(b.records().map(r=>r.id).sort(),['second','third']);
+});

@@ -1,0 +1,20 @@
+import { mkdir, cp, access } from 'node:fs/promises';
+import { join } from 'node:path';
+
+await mkdir('dist', { recursive: true });
+await cp('public', 'dist', { recursive: true, force: true });
+const source = 'node_modules/pdfjs-dist/build';
+const target = join('dist', 'vendor', 'pdfjs');
+try {
+  await access(join(source, 'pdf.mjs'));
+  await mkdir(target, { recursive: true });
+  await Promise.all(['pdf.mjs', 'pdf.worker.mjs'].map(filename =>
+    cp(join(source, filename), join(target, filename), { force: true })
+  ));
+  await Promise.all(['cmaps', 'standard_fonts'].map(folder =>
+    cp(join('node_modules/pdfjs-dist', folder), join(target, folder), { recursive: true, force: true })
+  ));
+  console.log('PDF.js: self-hosted vendor copied into dist/vendor/pdfjs');
+} catch {
+  console.warn('PDF.js package unavailable. Run npm install and npm run build before opening PDFs.');
+}

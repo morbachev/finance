@@ -101,7 +101,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     $<HTMLSelectElement>('assets-recurring-category').value='';
     $<HTMLInputElement>('assets-recurring-enabled').checked=true;
     $('assets-recurring-form-title').textContent='定期入出金を追加';
-    $('assets-recurring-save').textContent='OneDriveに登録';
+    $('assets-recurring-save').textContent='保存';
     updateFormFields();
     dirty=false;
   }
@@ -149,7 +149,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     $<HTMLSelectElement>('assets-recurring-category').value=item.categoryId??'';
     $<HTMLInputElement>('assets-recurring-enabled').checked=item.enabled;
     $('assets-recurring-form-title').textContent=`「${item.name}」を編集`;
-    $('assets-recurring-save').textContent='変更をOneDriveへ保存';
+    $('assets-recurring-save').textContent='保存';
     updateFormFields();
     $('assets-recurring-form').scrollIntoView({behavior:'smooth',block:'start'});
   }
@@ -237,7 +237,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     $<HTMLSelectElement>('assets-once-to').value='cash-savings';
     $<HTMLInputElement>('assets-once-funding').checked=false;
     $('assets-once-dialog-title').textContent='入出金を登録';
-    $('assets-once-save').textContent='OneDriveに保存';
+    $('assets-once-save').textContent='保存';
     status($('assets-once-error'),'');
     onceFormFields();
   }
@@ -255,7 +255,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
       $<HTMLFormElement>('assets-once-form').querySelector<HTMLInputElement>(`input[name="assets-once-kind"][value="${entry.kind}"]`)!.checked=true;
       $<HTMLFormElement>('assets-once-form').querySelector<HTMLInputElement>(`input[name="assets-once-status"][value="${entry.status}"]`)!.checked=true;
       $('assets-once-dialog-title').textContent='入出金を編集';
-      $('assets-once-save').textContent='変更を保存';
+      $('assets-once-save').textContent='保存';
       onceFormFields();onceDirty=false;
     }
     onceDialog.showModal();

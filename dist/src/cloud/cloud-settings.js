@@ -34,8 +34,10 @@ function updateUi() {
     const id = $('cloud-client-id').value.trim();
     const connected = !!account() && activeId === id;
     $('cloud-save-id').toggleAttribute('disabled', busy || !validId(id));
-    $('cloud-login').toggleAttribute('disabled', busy || !validId(id) || (connected && !reauthenticationRequired));
-    $('cloud-login').textContent = connected && reauthenticationRequired ? 'Microsoftアカウントを再接続' : 'Microsoftアカウントで接続';
+    // A cached MSAL account is not proof of a working token or the intended OneDrive account.
+    // Keep explicit reconnect available even if the cached account looks connected.
+    $('cloud-login').toggleAttribute('disabled', busy);
+    $('cloud-login').textContent = connected ? 'Microsoftアカウントを再接続' : 'Microsoftアカウントで接続';
     $('cloud-logout').toggleAttribute('disabled', busy || !connected);
     $('cloud-folder-check').toggleAttribute('disabled', busy || !connected);
     $('cloud-vault-diagnose').toggleAttribute('disabled', busy || !connected);
@@ -88,9 +90,14 @@ export async function graphClient() {
     if (!user)
         throw new Error('まずOneDrive接続画面からMicrosoftアカウントにログインしてください。');
     try {
-        return new OneDriveTestClient((await instance.acquireTokenSilent({ scopes: SCOPES, account: user })).accessToken);
+        const token = await instance.acquireTokenSilent({ scopes: SCOPES, account: user });
+        reauthenticationRequired = false;
+        updateUi();
+        return new OneDriveTestClient(token.accessToken);
     }
     catch {
+        reauthenticationRequired = true;
+        updateUi();
         status('Microsoftアカウントの再認証が必要です。');
         if (!window.confirm('認証情報の更新が必要です。未保存の編集内容を確認してからMicrosoftログインへ移動してください。続行しますか？'))
             throw new Error('認証をキャンセルしました。');
@@ -158,19 +165,23 @@ export function initCloudSettings(handlers) {
     $('cloud-login').addEventListener('click', () => {
         void action(async () => {
             const value = $('cloud-client-id').value.trim();
+            if (!validId(value)) {
+                $('cloud-advanced').open = true;
+                $('cloud-client-id').focus();
+                throw new Error('先にMicrosoft EntraのClient IDを入力して保存してください。');
+            }
             if (localStorage.getItem(CLIENT_KEY) !== value)
                 throw new Error('先にClient IDを保存してください。');
             const instance = await ensureMsal();
             if (account()) {
-                if (!reauthenticationRequired)
+                if (!window.confirm('Microsoftアカウントの認証をやり直します。接続先アカウントを確認し、未保存の編集がないことを確認してください。続行しますか？'))
                     return;
-                if (!window.confirm('Microsoftアカウントの認証画面を開いて再接続しますか？'))
-                    return;
-                await instance.acquireTokenRedirect({ scopes: SCOPES, account: account() });
-                return;
             }
-            if (!window.confirm('Microsoftログインへ移動します。未保存の編集がある場合は破棄されます。続行しますか？'))
-                return;
+            else {
+                if (!window.confirm('Microsoftログインへ移動します。未保存の編集がある場合は破棄されます。続行しますか？'))
+                    return;
+            }
+            // Always allow selection of the intended account. No vault data is created or deleted.
             await instance.loginRedirect({ scopes: SCOPES, prompt: 'select_account' });
         });
     });

@@ -3,7 +3,7 @@ import { GraphError } from './onedrive-api.js';
 import { decryptDocument, decryptIndex, decryptOriginal, deriveCloudKey, encryptDocument, encryptIndex, encryptOriginal, encryptRules, decryptRules, freshSalt, parseEnvelope, parseIndexEnvelope } from './cloud-crypto.js';
 import { emptyDocument, mergeDocuments } from './merge.js';
 import { emptyIndex, statementBucket, validateIndex } from './layout.js';
-import { emptyAssets, mergeAssets, validateSnapshot, validateRecurring, validateOneTime, validateNisaCardRule, validatePayrollAutoPassphrase, validateBirthMonth, validateCardDebitAccounts } from './assets.js';
+import { emptyAssets, mergeAssets, detectAssetsEditCollisions, validateSnapshot, validateRecurring, validateOneTime, validateNisaCardRule, validatePayrollAutoPassphrase, validateBirthMonth, validateCardDebitAccounts } from './assets.js';
 import { encryptAssets, decryptAssets } from './cloud-crypto.js';
 import { emptyRules, mergeRules, validateRule, validateCategory, listCategories, PALETTE, CATEGORIES } from './merchant-rules.js';
 const clone = (value) => structuredClone(value);
@@ -20,6 +20,7 @@ export class LiveVault {
     rulesRef = null;
     assetsDocument = emptyAssets();
     assetsRef = null;
+    assetConflictResolver = null;
     hasRemote = false;
     sessionExportable = false;
     hasLegacy = false;
@@ -28,6 +29,10 @@ export class LiveVault {
     pdfDrafts = new WeakMap();
     constructor(client) {
         this.client = client;
+    }
+    /** Ask the current user before overwriting any concurrent same-field asset change. */
+    setAssetConflictResolver(resolver) {
+        this.assetConflictResolver = resolver;
     }
     get unlocked() { return this.key !== null; }
     get isRotating() { return this.rotating; }
@@ -769,6 +774,14 @@ export class LiveVault {
                 if (this.assetsRef && !remote)
                     throw new Error('資産設定ファイルがOneDriveから消失しています。上書きせず停止します。');
                 const current = remote ? await decryptAssets(remote.text, key, this.salt) : emptyAssets();
+                const collisions = detectAssetsEditCollisions(base, local, current);
+                if (collisions.length) {
+                    if (!this.assetConflictResolver)
+                        throw new Error('別の端末でも同じ資産項目が変更されています。保存を停止しました。最新データを取得して確認してください。');
+                    const approved = await this.assetConflictResolver(collisions);
+                    if (!approved)
+                        throw new Error('同時編集のため保存を中止しました。OneDriveの内容は変更されていません。');
+                }
                 const merged = mergeAssets(base, local, current);
                 try {
                     const result = await this.client.writeAssetSettings(await encryptAssets(merged, key, this.salt), remote ? { id: remote.id, etag: remote.etag } : null);

@@ -17,6 +17,7 @@ import { initFutureProjection } from './ui/future-projection.js'; /* finance-v14
 import { canonicalStatementFilename } from './ui/statement-filename.js';
 import { initMonthlySummary } from './ui/monthly-summary.js'; /* finance-monthly-v140 */
 import { initPasswordFields, hidePasswordField, clearPasswordField } from './ui/password-fields.js';
+import { readLastView, saveLastView } from './ui/view-preference.js';
 const $ = (id) => {
     const node = document.getElementById(id);
     if (!node)
@@ -44,6 +45,7 @@ let summaryUi = null;
 let currentModal = null;
 let autoSaveTimer;
 let cloudStartupRunning = false;
+let vaultDiscoveryCompleted = false;
 let modalResolve = null;
 let activeIndex = -1;
 let clipboardHtml = '';
@@ -319,9 +321,13 @@ async function deleteStatement(index) {
     const name = getCard(statement.cardId)?.name ?? providerLabel(statement.provider);
     const storedId = savedIds.get(statement);
     const message = `${name}（${statement.billingMonth ?? '請求月不明'}）の明細を削除しますか？` +
-        (storedId ? '\n暗号化された保存データをOneDriveから削除します。この操作は元に戻せません。' : '\n未保存の解析結果を破棄します。');
-    // Error-state entries are discarded immediately, as requested.
-    if (!needsReview(statement) && !window.confirm(message))
+        (storedId ? '\nOneDriveの解析済み明細を削除します。' +
+            (statement.sourceKind === 'pdf' ? '\n暗号化PDF原本はOneDriveに保持されます。' : '') +
+            '\n解析済み明細の削除を元に戻すことはできません。' : '\n未保存の解析結果を破棄します。');
+    // Stored records always require confirmation, even when validation currently fails.
+    // Only unreviewable, never-saved import drafts may be discarded in one click.
+    const mustConfirm = !!storedId || !needsReview(statement);
+    if (mustConfirm && !window.confirm(message))
         return;
     batchBusy = true;
     operationResult(storedId ? `${name}の明細をOneDriveから削除中…` : `${name}の下書きを破棄しています…`, 'working');
@@ -554,7 +560,9 @@ function appendCloudRecordsKeepingDrafts(records) {
 function updateCloudStatus(message) {
     const label = $('cloud-live-status');
     const bar = $('cloud-live-bar');
-    const state = !liveVault ? '未接続' : liveVault.unlocked ? '接続済み' : liveVault.exists ? 'ロック中' : '初期設定が必要';
+    const state = !liveVault ? '未接続' : liveVault.unlocked ? '接続済み' : !vaultDiscoveryCompleted ? '確認中' : liveVault.exists ? 'ロック中' : '保管庫なし';
+    // New vault creation is an explicit action, never a side effect of refresh.
+    $('cloud-new-vault').classList.toggle('hidden', !liveVault || !vaultDiscoveryCompleted || liveVault.exists || liveVault.unlocked);
     label.textContent = `OneDrive：${state}`;
     // Keep the global bar quiet when connected. Only missing access or an error needs attention.
     const failure = message && /失敗|エラー|不備|接続してください|未保存|更新確認/.test(message);
@@ -565,12 +573,24 @@ async function startCloud() {
     if (cloudStartupRunning || liveVault?.unlocked)
         return;
     cloudStartupRunning = true;
+    vaultDiscoveryCompleted = false;
     try {
         const client = await graphClient();
         liveVault = new LiveVault(client);
+        liveVault.setAssetConflictResolver(collisions => {
+            const labels = {
+                balance: '残高', observedAt: '残高確認日時', amount: '金額', name: '名称', date: '日付', status: '入出金の状態',
+                nisaCardRule: 'NISAのカード積立', payrollDepositAccount: '給与の入金先', payrollAutoPassphrase: '給与の自動取得設定',
+                birthMonth: '生年月', mizuhoTransferPlan: 'みずほ送金予測', delete: '削除と編集',
+            };
+            const summary = collisions.slice(0, 6).map(item => `・${labels[item.field] ?? item.field}`).join('\n');
+            const extra = collisions.length > 6 ? `\nほか${collisions.length - 6}件` : '';
+            return window.confirm(`別の端末で同じ資産項目が変更されています（${collisions.length}件）。\n${summary}${extra}\n\n［OK］この端末の変更を採用して保存します。\n［キャンセル］保存を中止し、OneDrive上の変更を維持します。\n\n内容を確認してから選択してください。`);
+        });
         assetsUi?.render();
         futureUi?.render();
         const exists = await liveVault.discover();
+        vaultDiscoveryCompleted = true;
         updateCloudStatus();
         if (exists) {
             const store = sessionStorageSafe();
@@ -596,12 +616,15 @@ async function startCloud() {
                 await askVault('unlock');
         }
         else {
-            showView('settings');
-            await askVault('create');
+            if (!readLastView(sessionStorageSafe()))
+                showView('settings');
+            updateCloudStatus();
+            operationResult('現在のMicrosoftアカウントのアプリ領域にFinance保管庫が見つかりません。既存データを探している場合は、MicrosoftアカウントとClient IDを確認してください。', 'bad');
         }
     }
     catch (error) {
-        showView('settings');
+        if (!readLastView(sessionStorageSafe()))
+            showView('settings');
         updateCloudStatus(`OneDriveに接続してください：${error instanceof Error ? error.message : '接続エラー'}`);
     }
     finally {
@@ -609,11 +632,15 @@ async function startCloud() {
     }
 }
 async function refreshCloud() {
-    if (!liveVault?.unlocked) {
-        if (!liveVault)
-            await startCloud();
-        else
-            await askVault(liveVault.exists ? 'unlock' : 'create');
+    if (!liveVault || !vaultDiscoveryCompleted)
+        await startCloud();
+    if (!liveVault || !vaultDiscoveryCompleted)
+        throw new Error('Microsoftアカウントの認証と保管庫の確認を完了してください。');
+    if (!liveVault.exists)
+        throw new Error('このMicrosoftアカウントのアプリ領域に保管庫がありません。接続先アカウントとClient IDを確認してください。新規作成は実行していません。');
+    if (!liveVault.unlocked) {
+        if (!await askVault('unlock'))
+            throw new Error('既存保管庫のロック解除をキャンセルしました。');
         return;
     }
     if (pending().length || failedImports.length)
@@ -703,6 +730,7 @@ function showView(view) {
     if (content)
         content.scrollTop = 0;
     window.scrollTo(0, 0);
+    saveLastView(sessionStorageSafe(), view);
 }
 function managerIndices() {
     return filteredStatementIndices(statements, manageYear, manageMonth);
@@ -940,7 +968,7 @@ function resetRuleEditor() {
     updateRuleCategoryVisual();
     $('rule-priority').value = '100';
     $('rule-enabled').checked = true;
-    $('rule-save').textContent = 'OneDriveにルールを保存';
+    $('rule-save').textContent = '保存';
 }
 function populateRuleEditor(rule) {
     editingRuleId = rule.id;
@@ -956,7 +984,7 @@ function populateRuleEditor(rule) {
     updateRuleCategoryVisual();
     $('rule-priority').value = String(rule.priority);
     $('rule-enabled').checked = rule.enabled;
-    $('rule-save').textContent = '変更をOneDriveに保存';
+    $('rule-save').textContent = '保存';
     $('rule-pattern').focus();
     $('rules-form').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
@@ -1664,6 +1692,28 @@ function init() {
             window.scrollTo(0, 0);
         },
     });
+    $('cloud-new-vault').addEventListener('click', () => {
+        void (async () => {
+            try {
+                if (cloudStartupRunning || !liveVault || !vaultDiscoveryCompleted)
+                    throw new Error('先に接続先の保管庫を確認してください。');
+                const nowExists = await liveVault.discover();
+                vaultDiscoveryCompleted = true;
+                updateCloudStatus();
+                if (nowExists) {
+                    operationResult('既存の保管庫が見つかりました。新規作成せずに解除してください。');
+                    await askVault('unlock');
+                    return;
+                }
+                const answer = window.confirm('現在接続しているMicrosoftアカウントのアプリ領域にFinance保管庫が見つかりません。\n\n既存のFinanceデータを探している場合は、新規作成せずアカウントとClient IDを確認してください。\n\nこのアカウントに新しい保管庫を作成しますか？');
+                if (answer)
+                    await askVault('create');
+            }
+            catch (error) {
+                operationResult(`保管庫の確認に失敗しました：${error instanceof Error ? error.message : '通信エラー'}`, 'bad');
+            }
+        })();
+    });
     initCloudSettings({
         onChangePassphrase: async (current, next, onProgress) => {
             if (!liveVault?.unlocked)
@@ -1957,6 +2007,9 @@ function init() {
             }
         })();
     });
+    const lastView = readLastView(sessionStorageSafe());
+    if (lastView)
+        showView(lastView);
     void refreshVaultControls();
     render();
     void startCloud();

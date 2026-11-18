@@ -5,17 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101b30">
   <meta name="description" content="カード請求明細をOneDriveへ暗号化保存し、ブラウザで解析・照合する個人用アプリ">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://graph.microsoft.com https://login.microsoftonline.com https://*.1drv.com https://*.sharepoint.com https://*.onedrive.com; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; frame-src 'self' https://login.microsoftonline.com; form-action 'self' https://login.microsoftonline.com">
   <title>Finance / Statement Importer</title>
-  <script>
-    // Theme preference only. No statement data is stored in localStorage.
-    try {
-      const preference = localStorage.getItem('finance-theme') || 'system';
-      const dark = preference === 'dark' || (preference !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
-      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-    } catch {
-      document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    }
-  </script>
+  <script src="./scripts/theme-boot.js"></script>
   <link rel="stylesheet" href="./styles/style.css">
   <link rel="stylesheet" href="./styles/monthly-summary.css">
   <link rel="stylesheet" href="./styles/future-projection.css">
@@ -40,6 +32,9 @@
   <link rel="stylesheet" href="./styles/ui-v162.css">
   <link rel="stylesheet" href="./styles/ui-v163.css">
   <link rel="stylesheet" href="./styles/ui-v164.css">
+  <link rel="stylesheet" href="./styles/ui-v165.css">
+  <link rel="stylesheet" href="./styles/ui-v167.css">
+  <link rel="stylesheet" href="./styles/ui-v168.css">
 </head>
 <body>
   <div class="app-shell">
@@ -83,7 +78,7 @@
             <option value="dark">ダークモード</option>
           </select>
         </div>
-        <div class="sidebar-meta"><span>Finance v1.6.4</span><time id="app-updated-at" datetime="2026-11-18">更新 2026/11/18 JST</time></div>
+        <div class="sidebar-meta"><span>Finance v1.6.8</span><time id="app-updated-at" datetime="2026-11-18">更新 2026/11/18 JST</time></div>
       </div>
       </div>
     </aside>
@@ -192,7 +187,7 @@
                 </div>
                 <div class="manage-toolbar"><h3>取引明細</h3><button type="button" id="manage-add-row" class="secondary-action">＋ 行を追加</button></div>
                 <div class="table-scroll"><table class="transaction-table"><colgroup><col class="col-date"><col class="col-merchant"><col class="col-amount"><col class="col-note"><col class="col-operation"></colgroup><thead><tr><th aria-sort="none"><button type="button" id="manage-sort-date" class="manage-sort-button" aria-label="利用日順に並べ替え">利用日 ↕</button></th><th>利用先</th><th class="amount-column" aria-sort="none"><button type="button" id="manage-sort-amount" class="manage-sort-button" aria-label="金額順に並べ替え">金額 ↕</button></th><th>補足</th><th>操作</th></tr></thead><tbody id="manage-rows"></tbody></table></div>
-                <div class="manage-foot"><p id="manage-validation"></p><button type="button" id="manage-original-download" class="secondary-action" disabled>原本PDFをダウンロード</button><button type="button" id="manage-save" class="save-action">OneDriveに保存</button><button type="button" id="manage-delete" class="secondary-action">この明細を削除</button></div>
+                <div class="manage-foot"><p id="manage-validation"></p><button type="button" id="manage-original-download" class="secondary-action" disabled>原本PDFをダウンロード</button><button type="button" id="manage-save" class="save-action">保存</button><button type="button" id="manage-delete" class="secondary-action">この明細を削除</button></div>
               </div>
             </section>
           </div>
@@ -245,7 +240,7 @@
                   <p class="rules-help">数字が大きいルールを優先。同点なら完全一致 → 前方一致 → 部分一致の順で判定します。</p>
                 </details>
                 <div class="rules-form-actions">
-                  <button type="submit" id="rule-save" class="save-action">OneDriveにルールを保存</button>
+                  <button type="submit" id="rule-save" class="save-action">保存</button>
                   <button type="button" id="rule-reset" class="secondary-action">入力をクリア</button>
                 </div>
               </form>
@@ -279,7 +274,7 @@
           </div>
           <div class="categories-dialog-foot">
             <p id="rules-category-status" role="status" aria-live="polite">カテゴリーを追加・編集したら、OneDriveに保存してください。</p>
-            <div class="categories-dialog-actions"><button type="button" id="categories-dialog-cancel" class="secondary-action">キャンセル</button><button type="button" id="categories-dialog-save" class="save-action">OneDriveに保存</button></div>
+            <div class="categories-dialog-actions"><button type="button" id="categories-dialog-cancel" class="secondary-action">キャンセル</button><button type="button" id="categories-dialog-save" class="save-action">保存</button></div>
           </div>
         </dialog>
 
@@ -353,7 +348,7 @@
                   <label><input type="radio" name="assets-once-status" value="planned">予定</label>
                 </fieldset>
                 <p id="assets-once-error" class="assets-operation-status" role="alert"></p>
-                <div class="assets-once-actions"><button type="button" id="assets-once-cancel" class="secondary-action">キャンセル</button><button type="submit" id="assets-once-save" class="save-action">OneDriveに保存</button></div>
+                <div class="assets-once-actions"><button type="button" id="assets-once-cancel" class="secondary-action">キャンセル</button><button type="submit" id="assets-once-save" class="save-action">保存</button></div>
               </form>
             </dialog>
             <details class="assets-links-panel panel" id="assets-card-links">
@@ -443,7 +438,7 @@
                   </div>
                   <label class="rules-check assets-enabled"><input type="checkbox" id="assets-recurring-enabled" checked> この設定を有効にする</label>
                   <p class="assets-help">「末日」は毎月の最終日、31日など存在しない日は月末に繰り上げます。実際の入出金確認は行わず、予定額で推定します。</p>
-                  <div class="rules-form-actions"><button type="submit" id="assets-recurring-save" class="save-action">OneDriveに登録</button><button type="button" id="assets-recurring-clear" class="secondary-action">入力をクリア</button></div>
+                  <div class="rules-form-actions"><button type="submit" id="assets-recurring-save" class="save-action">保存</button><button type="button" id="assets-recurring-clear" class="secondary-action">入力をクリア</button></div>
                   <p class="assets-operation-status" id="assets-recurring-status" role="status" aria-live="polite"></p>
                 </form>
               </section>
@@ -555,6 +550,7 @@
             <div class="cloud-primary-actions">
               <button type="button" id="cloud-login" class="save-action">Microsoftアカウントで接続</button>
               <button type="button" id="cloud-live-refresh" class="secondary-action">最新データを取得</button>
+              <button type="button" id="cloud-new-vault" class="secondary-action hidden">新しい保管庫を作成</button>
               <button type="button" id="cloud-live-lock" class="secondary-action">保管庫をロック</button>
               <button type="button" id="cloud-logout" class="cloud-link-action">サインアウト</button>
             </div>

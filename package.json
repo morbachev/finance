@@ -1,11 +1,11 @@
 {
   "name": "finance-importer-starter",
-  "version": "1.6.4",
+  "version": "1.6.8",
   "private": true,
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
-    "build": "tsc && node scripts/copy-static.mjs && node scripts/build-msal.mjs",
+    "build": "node scripts/clean-dist.mjs && tsc && node scripts/copy-static.mjs && node scripts/build-msal.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "verify:cloud": "node scripts/check-cloud-asset.mjs"
   },

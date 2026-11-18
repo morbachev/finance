@@ -227,8 +227,46 @@ export function latestBalance(doc:AssetsDocument,account:AssetAccountId,asOf?:st
   const found=doc.snapshots.filter(s=>s.accountId===account&&(!asOf||s.observedAt<=asOf));
   return found.sort((a,b)=>b.observedAt.localeCompare(a.observedAt)||b.id.localeCompare(a.id))[0]??null;
 }
+/** Describe collisions without exposing financial amounts or encrypted credentials in UI. */
+export interface AssetsEditCollision { itemId:string; field:string }
+/** Finds only same-field changes (and delete-vs-edit collisions). Disjoint edits
+ * are safe to merge without interrupting the user. */
+export function detectAssetsEditCollisions(base:AssetsDocument,local:AssetsDocument,remote:AssetsDocument):AssetsEditCollision[] {
+  const collisions:AssetsEditCollision[]=[];
+  const mark=(itemId:string,field:string)=>{
+    if(!collisions.some(c=>c.itemId===itemId&&c.field===field))collisions.push({itemId,field});
+  };
+  const sameEdit=(itemId:string,field:string,baseline:unknown,left:unknown,right:unknown)=>{
+    if(!same(left,baseline)&&!same(right,baseline)&&!same(left,right))mark(itemId,field);
+  };
+  const collection=<T extends {id:string}>(b:T[],l:T[],r:T[],bDeleted:string[],lDeleted:string[],rDeleted:string[],fields:(keyof T)[])=>{
+    const bm=new Map(b.map(x=>[x.id,x])),lm=new Map(l.map(x=>[x.id,x])),rm=new Map(r.map(x=>[x.id,x]));
+    for(const id of new Set([...bm.keys(),...lm.keys(),...rm.keys(),...bDeleted,...lDeleted,...rDeleted])){
+      const bv=bm.get(id),lv=lm.get(id),rv=rm.get(id);
+      if(lDeleted.includes(id)&&rv&&!same(rv,bv))mark(id,'delete');
+      if(rDeleted.includes(id)&&lv&&!same(lv,bv))mark(id,'delete');
+      if(!lv||!rv||lDeleted.includes(id)||rDeleted.includes(id))continue;
+      for(const field of fields)sameEdit(id,String(field),bv?.[field],lv[field],rv[field]);
+    }
+  };
+  collection(base.snapshots,local.snapshots,remote.snapshots,base.deletedSnapshots,local.deletedSnapshots,remote.deletedSnapshots,
+    ['accountId','balance','observedAt']);
+  collection(base.recurring,local.recurring,remote.recurring,base.deletedRecurring,local.deletedRecurring,remote.deletedRecurring,
+    ['name','amount','kind','fromAccountId','toAccountId','frequency','dayOfMonth','monthOfYear','weekday','startOn','endOn','categoryId','enabled']);
+  collection(base.oneTime??[],local.oneTime??[],remote.oneTime??[],base.deletedOneTime??[],local.deletedOneTime??[],remote.deletedOneTime??[],
+    ['date','name','amount','kind','status','fromAccountId','toAccountId','cardFunding']);
+  sameEdit('nisa-card-rule','nisaCardRule',base.nisaCardRule??null,local.nisaCardRule??null,remote.nisaCardRule??null);
+  sameEdit('payroll-deposit-account','payrollDepositAccount',base.payrollDepositAccount??null,local.payrollDepositAccount??null,remote.payrollDepositAccount??null);
+  sameEdit('payroll-auto-credential','payrollAutoPassphrase',base.payrollAutoPassphrase??null,local.payrollAutoPassphrase??null,remote.payrollAutoPassphrase??null);
+  sameEdit('birth-month','birthMonth',base.birthMonth,local.birthMonth,remote.birthMonth);
+  for(const id of new Set([...Object.keys(base.cardDebitAccounts??{}),...Object.keys(local.cardDebitAccounts??{}),...Object.keys(remote.cardDebitAccounts??{})]))
+    sameEdit('card-debit-accounts',id,base.cardDebitAccounts?.[id],local.cardDebitAccounts?.[id],remote.cardDebitAccounts?.[id]);
+  sameEdit('mizuho-transfer-plan','mizuhoTransferPlan',base.mizuhoTransferPlan,local.mizuhoTransferPlan,remote.mizuhoTransferPlan);
+  return collisions;
+}
 /** Merge independent additions, removals and field edits from two devices. Concurrent
- * same-field edits prefer the saving device and retain the other value in encrypted audit. */
+ * same-field edits prefer the saving device ONLY after explicit user approval in LiveVault.
+ * This pure function retains old merge behavior for compatibility with existing audit data. */
 export function mergeAssets(base:AssetsDocument,local:AssetsDocument,remote:AssetsDocument,now=new Date().toISOString()):AssetsDocument {
   const conflicts=[...remote.conflicts];
   for(const c of local.conflicts)if(!conflicts.some(x=>same(x,c)))conflicts.push(clone(c));

@@ -6,7 +6,7 @@ import { OneDriveTestClient, GraphError } from './onedrive-api.js';
 import { decryptDocument, decryptIndex, decryptOriginal, deriveCloudKey, encryptDocument, encryptIndex, encryptOriginal, encryptRules, decryptRules, freshSalt, parseEnvelope, parseIndexEnvelope } from './cloud-crypto.js';
 import { emptyDocument, mergeDocuments, type CloudDocument, type CloudRecord } from './merge.js';
 import { emptyIndex, statementBucket, type FinanceIndex, type YearBucket, validateIndex } from './layout.js';
-import { emptyAssets, mergeAssets, validateSnapshot, validateRecurring, validateOneTime, type OneTimeEntry, type AssetsDocument, type AssetAccountId, type BalanceSnapshot, type RecurringEntry, type NisaCardRule, validateNisaCardRule, validatePayrollAutoPassphrase, validateBirthMonth, validateCardDebitAccounts } from './assets.js';
+import { emptyAssets, mergeAssets, detectAssetsEditCollisions, type AssetsEditCollision, validateSnapshot, validateRecurring, validateOneTime, type OneTimeEntry, type AssetsDocument, type AssetAccountId, type BalanceSnapshot, type RecurringEntry, type NisaCardRule, validateNisaCardRule, validatePayrollAutoPassphrase, validateBirthMonth, validateCardDebitAccounts } from './assets.js';
 import { encryptAssets, decryptAssets } from './cloud-crypto.js';
 import { emptyRules, mergeRules, validateRule, validateCategory, listCategories, PALETTE, CATEGORIES, type CategoryDefinition, type CategoryId, type PaletteId, type MerchantRule, type MerchantRulesDocument } from './merchant-rules.js';
 
@@ -26,6 +26,7 @@ export class LiveVault {
   private rulesRef:FileRef|null=null;
   private assetsDocument:AssetsDocument=emptyAssets();
   private assetsRef:FileRef|null=null;
+  private assetConflictResolver:((items:readonly AssetsEditCollision[])=>boolean|Promise<boolean>)|null=null;
   private hasRemote=false;
   private sessionExportable=false;
   private hasLegacy=false;
@@ -33,6 +34,10 @@ export class LiveVault {
   private draftIds=new WeakMap<ParsedStatement,string>();
   private pdfDrafts=new WeakMap<Uint8Array,{id:string;month:string|null;encrypted:string}>();
   constructor(private readonly client:OneDriveTestClient){}
+  /** Ask the current user before overwriting any concurrent same-field asset change. */
+  setAssetConflictResolver(resolver:((items:readonly AssetsEditCollision[])=>boolean|Promise<boolean>)|null):void {
+    this.assetConflictResolver=resolver;
+  }
   get unlocked():boolean{return this.key!==null;}
   get isRotating():boolean{return this.rotating;}
   get exists():boolean{return this.hasRemote;}
@@ -623,6 +628,13 @@ export class LiveVault {
         const remote=await this.client.readAssetSettings();
         if(this.assetsRef&&!remote)throw new Error('資産設定ファイルがOneDriveから消失しています。上書きせず停止します。');
         const current=remote?await decryptAssets(remote.text,key,this.salt):emptyAssets();
+        const collisions=detectAssetsEditCollisions(base,local,current);
+        if(collisions.length){
+          if(!this.assetConflictResolver)
+            throw new Error('別の端末でも同じ資産項目が変更されています。保存を停止しました。最新データを取得して確認してください。');
+          const approved=await this.assetConflictResolver(collisions);
+          if(!approved)throw new Error('同時編集のため保存を中止しました。OneDriveの内容は変更されていません。');
+        }
         const merged=mergeAssets(base,local,current);
         try {
           const result=await this.client.writeAssetSettings(await encryptAssets(merged,key,this.salt),remote?{id:remote.id,etag:remote.etag}:null);

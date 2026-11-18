@@ -20,10 +20,10 @@ test('main merchant input remains one line and multiple options remain',()=>{
   assert.match(html,/id="rule-pattern-add"/);
   assert.match(css,/#rule-pattern-help\{padding:0!important/);
 });
-test('category draft form is before list and actions distinguish draft versus cloud',()=>{
+test('category draft form is before list and actions distinguish adding to the draft from final save',()=>{
   const modal=html.slice(html.indexOf('<dialog id="categories-dialog"'),html.indexOf('</dialog>',html.indexOf('<dialog id="categories-dialog"')));
   assert.ok(modal.indexOf('class="rules-category-create"')<modal.indexOf('id="rules-category-list"'));
   assert.match(modal,/id="rules-category-add"[^>]+>＋ 一覧に追加/);
-  assert.match(modal,/id="categories-dialog-save"[^>]+>OneDriveに保存/);
+  assert.match(modal,/id="categories-dialog-save"[^>]+>保存/);
   assert.equal((modal.match(/id="rules-category-add"/g)||[]).length,1);
 });

@@ -67,7 +67,7 @@ function frequencyLabel(e) {
     return e.frequency === 'monthly' ? `毎月${day}` : `毎年${e.monthOfYear}月${day}`;
 }
 export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollChange = () => { }) {
-    let busy = false, dirty = false, nisaDirty = false, editingId = null;
+    let busy = false, dirty = false, nisaDirty = false, birthDirty = false, editingId = null;
     let payrollSession = null;
     let payrollIncome = [];
     let payrollSynced = false, payrollBusy = false, payrollAccountDirty = false;
@@ -92,9 +92,10 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
     };
     function toggleBusy(next) {
         busy = next;
-        for (const button of $('assets-workspace').querySelectorAll('button'))
+        for (const button of document.querySelectorAll('#assets-workspace button, #settings-nisa-panel button'))
             button.disabled = busy;
         if (!busy) {
+            renderBirthMonth();
             const linkButton = document.getElementById('assets-nisa-disable');
             if (linkButton)
                 linkButton.disabled = !getVault()?.unlocked || !getVault()?.assetSettings().nisaCardRule;
@@ -551,6 +552,40 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             toggleBusy(false);
         }
     }
+    function renderBirthMonth() {
+        const vault = getVault();
+        const input = $('assets-birth-month');
+        input.disabled = !vault?.unlocked || busy;
+        $('assets-birth-save').disabled = !vault?.unlocked || busy;
+        if (!birthDirty)
+            input.value = vault?.unlocked ? vault.assetSettings().birthMonth ?? '' : '';
+    }
+    async function saveBirthMonth() {
+        if (busy)
+            return;
+        const input = $('assets-birth-month');
+        const month = input.value;
+        const node = $('assets-birth-status');
+        if (!/^(19|20|21)\d{2}-(0[1-9]|1[0-2])$/.test(month) || month > localDate().slice(0, 7)) {
+            status(node, '生年月を確認してください。', true);
+            return;
+        }
+        toggleBusy(true);
+        status(node, '保存中…');
+        try {
+            await requireVault().setBirthMonth(month);
+            birthDirty = false;
+            status(node, '保存しました。');
+            onSaved('生年月を保存しました。');
+            render();
+        }
+        catch (error) {
+            status(node, mutationError(error), true);
+        }
+        finally {
+            toggleBusy(false);
+        }
+    }
     function renderNisaLink() {
         const vault = getVault();
         if (!vault?.unlocked)
@@ -819,6 +854,9 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
         const unlocked = !!getVault()?.unlocked;
         for (const element of document.querySelectorAll('#assets-payroll-connect input, #assets-payroll-connect button, #assets-payroll-deposit-form select, #assets-payroll-deposit-form button'))
             element.disabled = !unlocked;
+        for (const element of document.querySelectorAll('#assets-nisa-link-form input, #assets-nisa-link-form select, #assets-nisa-link-form button'))
+            element.disabled = !unlocked || busy;
+        renderBirthMonth();
         $('assets-lock-message').classList.toggle('hidden', unlocked);
         $('assets-workspace').classList.toggle('hidden', !unlocked);
         if (!unlocked)
@@ -891,6 +929,8 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
     $('assets-balances-form').addEventListener('submit', event => { event.preventDefault(); void saveSnapshots(); });
     choices($('assets-nisa-card'), CARDS.map(c => ({ value: c.id, label: c.name })));
     $('assets-nisa-link-form').addEventListener('input', () => { nisaDirty = true; });
+    $('assets-birth-month').addEventListener('input', () => { birthDirty = true; });
+    $('assets-birth-form').addEventListener('submit', event => { event.preventDefault(); void saveBirthMonth(); });
     $('assets-nisa-link-form').addEventListener('change', () => { nisaDirty = true; });
     $('assets-nisa-link-form').addEventListener('submit', event => { event.preventDefault(); void updateNisaLink(); });
     $('assets-nisa-disable').addEventListener('click', () => { void updateNisaLink(true); });
@@ -962,6 +1002,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             resetOnceForm();
             onceShowAll = false;
             nisaDirty = false;
+            birthDirty = false;
             payrollAccountDirty = false;
             cardDebitAccountsDirty = false;
             mizuhoPlanDirty = false;
@@ -978,11 +1019,12 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             status($('assets-payroll-status'), '');
             for (const account of ASSET_ACCOUNTS)
                 amounts.get(account.id).value = '';
+            status($('assets-birth-status'), '');
             status($('assets-balances-status'), '');
             status($('assets-recurring-status'), '');
             status($('assets-once-status'), '');
             render();
             onPayrollChange();
-        }, isBusy: () => busy || payrollBusy, isDirty: () => onceDirty || dirty || nisaDirty || payrollAccountDirty || cardDebitAccountsDirty || mizuhoPlanDirty || editing() || [...amounts.values()].some(input => input.value.trim() !== '') ||
+        }, isBusy: () => busy || payrollBusy, isDirty: () => onceDirty || dirty || nisaDirty || birthDirty || payrollAccountDirty || cardDebitAccountsDirty || mizuhoPlanDirty || editing() || [...amounts.values()].some(input => input.value.trim() !== '') ||
             value('assets-recurring-name').trim() !== '' || value('assets-recurring-amount').trim() !== '' };
 }

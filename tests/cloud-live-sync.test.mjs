@@ -171,7 +171,8 @@ test('multi-year partial save retries with the same IDs and no duplicate records
   await assert.rejects(a.saveBatch([{statement:first},{statement:second}]),error=>error.name==='CloudWriteUncertainError'&&/year outage/.test(String(error.reason)));
   assert.equal(a.records().length,1,'one year committed, no false all-success state');
   mock.failYear=null;
-  const ids=await a.saveBatch([{statement:first},{statement:second}]);
+  await assert.rejects(a.saveBatch([{statement:first},{statement:second}]), /保存を再開/);
+  const ids=await a.resumePendingYearBatch();
   assert.equal(new Set(ids).size,2);
   await a.refresh();
   assert.deepEqual(a.records().map(x=>x.id).sort(),ids.sort());
@@ -241,4 +242,75 @@ test('conditional 304 fast-path keeps all concurrent edits and tombstones',async
   await a.delete('first');
   await b.refresh();
   assert.deepEqual(b.records().map(r=>r.id).sort(),['second','third']);
+});
+
+test('v1.6.16: year retry checks remote files and skips already confirmed years',async()=>{
+  const [a,,mock]=drivers();await a.create(secret);
+  const items=[{id:'confirmed-year',statement:statement('2025-04')},{id:'pending-year',statement:statement('2026-04')}];
+  mock.failYear='2026';
+  await assert.rejects(a.saveBatch(items),error=>error.name==='CloudWriteUncertainError');
+  assert.equal(a.hasPendingYearBatch,true);
+  mock.failYear=null;
+  const earlier=mock.calls.filter(x=>x==='year:2025').length;
+  const ids=await a.resumePendingYearBatch();
+  assert.deepEqual(ids,['confirmed-year','pending-year']);
+  assert.equal(mock.calls.filter(x=>x==='year:2025').length,earlier,'confirmed year is not uploaded again');
+  assert.equal(a.hasPendingYearBatch,false);
+  assert.deepEqual(a.records().map(x=>x.id).sort(),ids.sort());
+});
+
+test('v1.6.16: ambiguous year upload response is reconciled without repeating write',async()=>{
+  const [a,,mock]=drivers();await a.create(secret);
+  const original=mock.writeYearVault.bind(mock);
+  let triggered=false;
+  mock.writeYearVault=async(year,text,ref)=>{
+    const value=await original(year,text,ref);
+    if(!triggered){triggered=true;throw new Error('lost response after commit');}
+    return value;
+  };
+  await assert.rejects(a.saveBatch([{id:'idempotent',statement:statement('2025-08')}]),/保存済みの可能性/);
+  const count=mock.calls.filter(x=>x==='year:2025').length;
+  assert.equal(count,1);
+  await a.resumePendingYearBatch();
+  assert.equal(mock.calls.filter(x=>x==='year:2025').length,count);
+  assert.equal(a.records().length,1);
+});
+
+test('v1.6.16: year retry refuses to overwrite a concurrent edit',async()=>{
+  const [a,,mock]=drivers();await a.create(secret);
+  mock.failYear='2026';
+  await assert.rejects(a.saveBatch([{id:'shared',statement:statement('2026-05','intended')}]),/保存済みの可能性/);
+  mock.failYear=null;
+  const other=new LiveVault(mock);
+  await other.unlock(secret);
+  await other.saveBatch([{id:'shared',statement:statement('2026-05','other-device')}]);
+  await assert.rejects(a.resumePendingYearBatch(),/他の端末で明細が更新/);
+  assert.equal(a.hasPendingYearBatch,true);
+  await a.refresh();
+  assert.equal(a.records().find(r=>r.id==='shared').statement.rows[0].merchant,'other-device');
+});
+
+test('v1.6.16: resuming a move to an earlier year removes the stale old-year copy',async()=>{
+  const [a,,mock]=drivers();await a.create(secret);
+  await a.saveBatch([{id:'move',statement:statement('2027-10')}]);
+  mock.failYear='2027';
+  await assert.rejects(a.saveBatch([{id:'move',statement:statement('2026-10')}]),/保存済みの可能性/);
+  mock.failYear=null;
+  await a.resumePendingYearBatch();
+  assert.equal(a.records().length,1);
+  assert.equal(a.records()[0].statement.billingMonth,'2026-10');
+  const {decryptDocument,deriveCloudKey}=await import('../dist/src/cloud/cloud-crypto.js');
+  const index=await mock.readFinanceIndex();
+  const {parseIndexEnvelope}=await import('../dist/src/cloud/cloud-crypto.js');
+  const key=await deriveCloudKey(secret,parseIndexEnvelope(index.text).salt);
+  const stale=await decryptDocument((await import('../dist/src/cloud/cloud-crypto.js')).parseEnvelope(mock.read('year','2027').text),key);
+  assert.equal(stale.records.length,0);
+  assert.ok(stale.deleted.includes('move'));
+});
+
+test('v1.6.16: definitively rejected first-year write is not treated as partial success',async()=>{
+  const [a,,mock]=drivers();await a.create(secret);
+  mock.writeYearVault=async()=>{throw new GraphError(403,'accessDenied');};
+  await assert.rejects(a.saveBatch([{id:'not-committed',statement:statement('2025-10')}]),error=>error instanceof GraphError&&error.status===403);
+  assert.equal(a.hasPendingYearBatch,false);
 });

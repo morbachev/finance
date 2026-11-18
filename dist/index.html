@@ -38,6 +38,8 @@
   <link rel="stylesheet" href="./styles/ui-v167.css">
   <link rel="stylesheet" href="./styles/ui-v168.css">
   <link rel="stylesheet" href="./styles/startup-recovery.css">
+  <link rel="stylesheet" href="./styles/ui-v1615.css">
+  <link rel="stylesheet" href="./styles/ui-v1616.css">
 </head>
 <body>
   <div class="app-shell">
@@ -81,7 +83,7 @@
             <option value="dark">ダークモード</option>
           </select>
         </div>
-        <div class="sidebar-meta"><span>Finance v1.6.13</span><time id="app-updated-at" datetime="2026-11-18">更新 2026/11/18 JST</time></div>
+        <div class="sidebar-meta"><span>Finance v1.6.16</span><time id="app-updated-at" datetime="2026-11-18">更新 2026/11/18 JST</time></div>
       </div>
       </div>
     </aside>
@@ -210,7 +212,7 @@
                 <div class="rules-pattern-header"><label for="rule-pattern">カード明細に記載される利用先</label><button type="button" id="rules-pick-merchant" class="rules-pick-button">履歴から選ぶ</button></div>
                 <div class="rule-pattern-editor">
                   <label class="sr-only" for="rule-pattern">利用先名</label>
-                  <input id="rule-pattern" type="text" maxlength="200" required placeholder="例：AA運送" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore="true">
+                  <input id="rule-pattern" type="text" maxlength="200" required placeholder="AA運送" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore="true">
                   <div id="rule-pattern-alternatives" class="rule-pattern-alternatives"></div>
                   <button id="rule-pattern-add" type="button" class="rules-pick-button">＋ 利用先を追加</button>
                   <p id="rule-pattern-help" class="rules-help">複数の利用先に同じ表示名・カテゴリーを適用できます。</p>
@@ -230,7 +232,7 @@
                   </label>
                 </div>
                 <label class="rules-field" for="rule-display-name">Financeで表示する名前
-                  <input id="rule-display-name" type="text" maxlength="120" required placeholder="例：Amazon">
+                  <input id="rule-display-name" type="text" maxlength="120" required placeholder="Amazon">
                 </label>
                 <div class="rules-category-picker"><div class="rules-pattern-header"><label for="rule-category">カテゴリー</label><button type="button" id="rules-category-jump" class="rules-pick-button">カテゴリーを管理</button></div><div class="rules-field rules-category-select"><span id="rule-category-dot" class="rules-category-dot" aria-hidden="true"></span><select id="rule-category"><option value="">分類しない</option></select></div></div>
                 <details class="rules-advanced"><summary>優先順位などの詳細設定</summary>
@@ -265,7 +267,7 @@
           <div class="categories-dialog-content">
             <div class="rules-category-create">
               <label for="rules-category-name">新しいカテゴリー
-                <input id="rules-category-name" type="text" maxlength="60" placeholder="例：ペット・教育・税金">
+                <input id="rules-category-name" type="text" maxlength="60" placeholder="ペット・教育・税金">
               </label>
               <label for="rules-category-color">色
                 <select id="rules-category-color"></select>
@@ -341,7 +343,7 @@
                 <div class="assets-once-fields">
                   <label for="assets-once-date">日付<input id="assets-once-date" type="date" required></label>
                   <label for="assets-once-amount">金額（円）<input id="assets-once-amount" type="number" min="1" step="1" inputmode="numeric" required placeholder="10000"></label>
-                  <label class="assets-once-wide" for="assets-once-name">名称<input id="assets-once-name" maxlength="80" required placeholder="例：貯金口座へ振替" autocomplete="off" data-1p-ignore></label>
+                  <label class="assets-once-wide" for="assets-once-name">名称<input id="assets-once-name" maxlength="80" required placeholder="貯金口座へ振替" autocomplete="off" data-1p-ignore></label>
                   <label for="assets-once-from" id="assets-once-from-wrap">出金元口座<select id="assets-once-from"></select></label>
                   <label for="assets-once-to" id="assets-once-to-wrap">入金先口座<select id="assets-once-to"></select></label>
                   <label class="assets-once-wide assets-once-funding hidden" id="assets-once-funding-wrap"><input id="assets-once-funding" type="checkbox"> みずほ楽天カードの代金送金</label>
@@ -355,20 +357,8 @@
               </form>
             </dialog>
             <details class="assets-links-panel panel" id="assets-card-links">
-              <summary>カード連携・引落口座</summary>
+              <summary>カードの引落口座</summary>
               <div class="assets-links-grid">
-              <section class="assets-nisa-link assets-link-card" id="assets-nisa-link" aria-labelledby="assets-nisa-link-heading">
-                <h3 id="assets-nisa-link-heading">NISAのカード積立</h3>
-              <form id="assets-nisa-link-form" autocomplete="off">
-                <div class="assets-nisa-fields">
-                  <label class="rules-field" for="assets-nisa-card">カード<select id="assets-nisa-card"></select></label>
-                  <label class="rules-field" for="assets-nisa-merchant">元の利用先に含まれる文字<input id="assets-nisa-merchant" maxlength="90" placeholder="例：楽天証券" autocomplete="off"></label>
-                </div>
-                <p class="assets-help">カード積立と定期入金を重複登録しないようご確認ください。</p>
-                <div class="assets-nisa-actions"><button type="submit" id="assets-nisa-save" class="secondary-action">連携条件を保存</button><button type="button" id="assets-nisa-disable" class="text-button">連携を解除</button><span id="assets-nisa-match-count" class="assets-nisa-count"></span></div>
-                <p id="assets-nisa-status" class="assets-operation-status" role="status" aria-live="polite"></p>
-              </form>
-              </section>
               <section class="assets-card-debits assets-link-card" id="assets-card-debits" aria-labelledby="assets-card-debits-heading">
                 <h3 id="assets-card-debits-heading">カードの引落口座</h3>
               <form id="assets-card-debits-form">
@@ -397,7 +387,7 @@
                 <form id="assets-recurring-form" autocomplete="off">
                   <div class="recurring-top-row">
                     <label class="rules-field" for="assets-recurring-name">名称
-                    <input id="assets-recurring-name" maxlength="80" required placeholder="例：医療保険、貯金口座への積立">
+                    <input id="assets-recurring-name" maxlength="80" required placeholder="医療保険、貯金口座への積立">
                   </label>
                     <label class="rules-field" for="assets-recurring-kind">種類
                       <select id="assets-recurring-kind"><option value="expense">支出（銀行引落）</option><option value="income">収入（銀行入金）</option><option value="transfer">口座間振替</option></select>
@@ -463,18 +453,13 @@
               <div class="future-planner">
                 <section class="future-step" aria-label="予測する年齢">
                   <div class="future-step-head"><h3>何歳まで予測する？</h3><span id="future-target-label" class="future-step-summary">40歳の誕生月</span></div>
-                  <div class="future-born-row">
-                    <label for="future-born">生年月<input id="future-born" type="month" min="1900-01" max="2100-12"></label>
-                    <button id="future-born-save" type="button" class="secondary-action">生年月を保存</button>
-                    <span id="future-born-status" class="future-muted" role="status"></span>
-                  </div>
+                  <button type="button" id="future-birth-settings" class="text-button future-birth-settings" hidden>生年月を設定</button>
                   <input id="future-target" type="month" hidden aria-label="予測終了月">
                   <label class="future-range-label" for="future-age"><span>目標年齢</span><output id="future-age-value">40歳</output></label>
                   <input id="future-age" type="range" min="18" max="80" step="1" value="40">
                 </section>
                 <section class="future-step" aria-label="NISAの予定">
                   <div class="future-step-head"><h3>NISAの運用・積立</h3></div>
-                  <label for="future-nisa-monthly">毎月のNISA積立額（円）<input id="future-nisa-monthly" type="number" min="0" step="1" inputmode="numeric"></label>
                   <label class="future-range-label" for="future-nisa-rate"><span>想定年利</span><output id="future-nisa-rate-value">3.0%</output></label>
                   <input id="future-nisa-rate" type="range" min="0" max="10" step="0.5" value="3">
                 </section>
@@ -505,36 +490,6 @@
             <h1>設定<span class="accent-dot">.</span></h1>
 
           </div>
-            <section class="panel assets-payroll-panel" aria-label="Payrollの給与連携">
-              <div class="panel-heading"><div><h2>Payroll連携</h2></div></div>
-              <div class="assets-payroll-layout">
-                <form id="assets-payroll-connect" autocomplete="off">
-                  <label class="rules-field" for="assets-payroll-secret">Payrollのパスフレーズ
-                    <input id="assets-payroll-secret" type="password" minlength="12" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="初回登録・変更時だけ入力">
-                  </label>
-                  <label class="assets-payroll-auto-option"><input id="assets-payroll-remember" type="checkbox" checked><span><strong>次回から自動取得する</strong></span></label>
-                  <div class="assets-payroll-actions"><button id="assets-payroll-sync" type="submit" class="secondary-action">給与データを取得</button><button id="assets-payroll-forget" type="button" class="text-button">自動取得を解除</button></div>
-
-                  <p id="assets-payroll-auto-status" class="assets-operation-status" aria-live="polite"></p>
-                </form>
-                <form id="assets-payroll-deposit-form" autocomplete="off">
-                  <label class="rules-field" for="assets-payroll-deposit">給与の振込先口座
-                    <select id="assets-payroll-deposit"><option value="">残高には加算しない（収入集計のみ）</option><option value="rakuten-bank">楽天銀行へ入金</option><option value="cash-savings">現金貯金専用口座へ入金</option></select>
-                  </label>
-                  <button type="submit" id="assets-payroll-deposit-save" class="secondary-action">入金先設定を保存</button>
-
-                </form>
-                <section id="assets-payroll-summary" class="assets-payroll-history-card" aria-label="給与の取得履歴">
-                  <h3 class="assets-payroll-history-title">取得履歴</h3>
-                  <div class="assets-payroll-summary-body">
-                  <div class="assets-payroll-metrics"><div><small>取得した給与明細</small><strong id="assets-payroll-count">0件</strong></div><div><small>最終同期</small><strong id="assets-payroll-last">未同期</strong></div></div>
-                  <div id="assets-payroll-months" class="assets-payroll-months"></div>
-                </div>
-              </section>
-              </div>
-              <p id="assets-payroll-status" class="assets-operation-status" role="status" aria-live="polite"></p>
-            </section>
-
         <section id="cloud-view" class="cloud-view settings-cloud-section" aria-label="アプリとOneDriveの設定">
           <div class="assets-section-head"><div><h2>OneDrive</h2></div></div>
 
@@ -553,6 +508,7 @@
             <div class="cloud-primary-actions">
               <button type="button" id="cloud-login" class="save-action">Microsoftアカウントで接続</button>
               <button type="button" id="cloud-live-refresh" class="secondary-action">最新データを取得</button>
+              <button type="button" id="cloud-resume-batch" class="secondary-action hidden">保存を再開</button>
               <button type="button" id="cloud-new-vault" class="secondary-action hidden">新しい保管庫を作成</button>
               <button type="button" id="cloud-live-lock" class="secondary-action">保管庫をロック</button>
               <button type="button" id="cloud-logout" class="cloud-link-action">サインアウト</button>
@@ -587,6 +543,61 @@
             <p id="cloud-rotate-status" class="cloud-status" role="status" aria-live="polite"></p>
           </section>
 
+
+        </section>
+            <section class="panel settings-nisa-panel" id="settings-nisa-panel" aria-label="NISA連携設定">
+              <div class="panel-heading"><h2>NISA連携</h2></div>
+<section class="assets-nisa-link assets-link-card" id="assets-nisa-link" aria-labelledby="assets-nisa-link-heading">
+                <h3 id="assets-nisa-link-heading">カード積立の連携</h3>
+              <form id="assets-nisa-link-form" autocomplete="off">
+                <div class="assets-nisa-fields">
+                  <label class="rules-field" for="assets-nisa-card">カード<select id="assets-nisa-card"></select></label>
+                  <label class="rules-field" for="assets-nisa-merchant">元の利用先に含まれる文字<input id="assets-nisa-merchant" maxlength="90" placeholder="楽天証券" autocomplete="off"></label>
+                </div>
+                <p class="assets-help">カード積立と定期入金を重複登録しないようご確認ください。</p>
+                <div class="assets-nisa-actions"><button type="submit" id="assets-nisa-save" class="secondary-action">連携条件を保存</button><button type="button" id="assets-nisa-disable" class="text-button">連携を解除</button><span id="assets-nisa-match-count" class="assets-nisa-count"></span></div>
+                <p id="assets-nisa-status" class="assets-operation-status" role="status" aria-live="polite"></p>
+              </form>
+              </section>
+                <form id="assets-birth-form" autocomplete="off" class="settings-nisa-birth-form">
+                  <label for="assets-birth-month">生年月
+                    <input id="assets-birth-month" type="month" min="1900-01" max="2100-12">
+                  </label>
+                  <button id="assets-birth-save" type="submit" class="secondary-action">保存</button>
+                </form>
+                <p id="assets-birth-status" class="assets-operation-status" role="status" aria-live="polite"></p>
+            </section>
+            <details class="panel assets-payroll-panel settings-payroll-disclosure" id="settings-payroll-disclosure" aria-label="Payrollの給与連携">
+              <summary class="settings-payroll-summary"><span>Payroll連携</span><span class="settings-payroll-chevron" aria-hidden="true"></span></summary>
+              <div class="settings-payroll-body">
+              <div class="assets-payroll-layout">
+                <form id="assets-payroll-connect" autocomplete="off">
+                  <label class="rules-field" for="assets-payroll-secret">Payrollのパスフレーズ
+                    <input id="assets-payroll-secret" type="password" minlength="12" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="初回登録・変更時だけ入力">
+                  </label>
+                  <label class="assets-payroll-auto-option"><input id="assets-payroll-remember" type="checkbox" checked><span><strong>次回から自動取得する</strong></span></label>
+                  <div class="assets-payroll-actions"><button id="assets-payroll-sync" type="submit" class="secondary-action">給与データを取得</button><button id="assets-payroll-forget" type="button" class="text-button">自動取得を解除</button></div>
+
+                  <p id="assets-payroll-auto-status" class="assets-operation-status" aria-live="polite"></p>
+                </form>
+                <form id="assets-payroll-deposit-form" autocomplete="off">
+                  <label class="rules-field" for="assets-payroll-deposit">給与の振込先口座
+                    <select id="assets-payroll-deposit"><option value="">残高には加算しない（収入集計のみ）</option><option value="rakuten-bank">楽天銀行へ入金</option><option value="cash-savings">現金貯金専用口座へ入金</option></select>
+                  </label>
+                  <button type="submit" id="assets-payroll-deposit-save" class="secondary-action">入金先設定を保存</button>
+
+                </form>
+                <section id="assets-payroll-summary" class="assets-payroll-history-card" aria-label="給与の取得履歴">
+                  <h3 class="assets-payroll-history-title">取得履歴</h3>
+                  <div class="assets-payroll-summary-body">
+                  <div class="assets-payroll-metrics"><div><small>取得した給与明細</small><strong id="assets-payroll-count">0件</strong></div><div><small>最終同期</small><strong id="assets-payroll-last">未同期</strong></div></div>
+                  <div id="assets-payroll-months" class="assets-payroll-months"></div>
+                </div>
+              </section>
+              </div>
+              <p id="assets-payroll-status" class="assets-operation-status" role="status" aria-live="polite"></p>
+              </div>
+            </details>
           <details class="cloud-advanced" id="cloud-advanced">
             <summary><span class="cloud-advanced-icon" aria-hidden="true">⚙</span><span><strong>詳細設定</strong></span><span class="cloud-chevron" aria-hidden="true">⌄</span></summary>
             <div class="cloud-advanced-content">
@@ -660,12 +671,24 @@
               </div>
             </div>
           </details>
-        </section>
+
+
         </div>
         <footer>FINANCE IMPORTER <span>ONEDRIVE PRIMARY · ENCRYPTED CLOUD DATA</span></footer>
       </div>
     </main>
   </div>
+  <dialog id="cloud-connect-dialog" class="vault-dialog cloud-connect-dialog" aria-labelledby="cloud-connect-title" aria-describedby="cloud-connect-copy">
+    <div class="vault-form">
+      <div class="vault-icon" aria-hidden="true">☁</div>
+      <h2 id="cloud-connect-title">OneDriveに接続</h2>
+      <p id="cloud-connect-copy">Microsoftアカウントで接続してください。</p>
+      <div class="vault-form-actions">
+        <button type="button" id="cloud-connect-later" class="secondary-action">あとで</button>
+        <button type="button" id="cloud-connect-continue" class="save-action">Microsoftアカウントで接続</button>
+      </div>
+    </div>
+  </dialog>
   <dialog id="vault-dialog" class="vault-dialog" aria-labelledby="vault-dialog-title">
     <form id="vault-form" class="vault-form">
       <div class="vault-icon" aria-hidden="true">⌑</div>

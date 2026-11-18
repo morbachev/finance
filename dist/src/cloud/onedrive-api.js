@@ -48,24 +48,78 @@ export class OneDriveTestClient {
         this.token = token;
         this.http = http;
     }
-    /** GET-only deadline: an unreachable OneDrive must not leave the UI waiting forever.
-     * Do not abort writes automatically: their server-side result may be uncertain. */
-    async httpWithReadTimeout(url, init) {
-        if ((init.method ?? 'GET').toUpperCase() !== 'GET')
-            return this.http(url, init);
+    /** A single read deadline covers headers and the entire response body.
+     * Writes are never aborted here because their committed state may be uncertain. */
+    async withReadDeadline(url, init, consume) {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 30000);
+        let timeout;
+        const expired = new Promise((_, reject) => {
+            timeout = setTimeout(() => {
+                controller.abort();
+                reject(new Error('OneDriveの読み取りが30秒以内に完了しませんでした。'));
+            }, 30000);
+        });
         try {
-            return await this.http(url, { ...init, signal: controller.signal });
+            return await Promise.race([
+                (async () => consume(await this.http(url, { ...init, signal: controller.signal })))(),
+                expired,
+            ]);
         }
         catch (error) {
             if (controller.signal.aborted)
-                throw new Error('OneDriveの読み取りが30秒以内に完了しませんでした。通信環境とMicrosoft認証を確認してください。');
+                throw new Error('OneDriveの読み取りが30秒以内に完了しませんでした。');
             throw error;
         }
         finally {
-            clearTimeout(timeout);
+            if (timeout !== undefined)
+                clearTimeout(timeout);
         }
+    }
+    async readResponseBytes(response, maxBytes) {
+        if (Number(response.headers.get('Content-Length') ?? 0) > maxBytes)
+            throw new Error('OneDriveのファイルがサイズ上限を超えています。');
+        if (!response.body) {
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            if (bytes.length > maxBytes)
+                throw new Error('OneDriveのファイルがサイズ上限を超えています。');
+            return bytes;
+        }
+        const reader = response.body.getReader();
+        const chunks = [];
+        let length = 0;
+        try {
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done)
+                    break;
+                length += value.byteLength;
+                if (length > maxBytes)
+                    throw new Error('OneDriveのファイルがサイズ上限を超えています。');
+                chunks.push(value);
+            }
+        }
+        finally {
+            reader.releaseLock();
+        }
+        const bytes = new Uint8Array(length);
+        let offset = 0;
+        for (const chunk of chunks) {
+            bytes.set(chunk, offset);
+            offset += chunk.byteLength;
+        }
+        return bytes;
+    }
+    async httpWithReadTimeout(url, init) {
+        if ((init.method ?? 'GET').toUpperCase() !== 'GET')
+            return this.http(url, init);
+        // Graph metadata is JSON and must fit within 8 MiB; downloading originals
+        // uses the separate size-bounded streaming path below.
+        return this.withReadDeadline(url, init, async (response) => {
+            const data = await this.readResponseBytes(response, 8 * 1024 * 1024);
+            return new Response([204, 205, 304].includes(response.status) ? null : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength), {
+                status: response.status, statusText: response.statusText, headers: response.headers,
+            });
+        });
     }
     async graph(path, init = {}, allowNotModified = false) {
         const response = await this.httpWithReadTimeout(GRAPH + path, {
@@ -99,43 +153,14 @@ export class OneDriveTestClient {
         const url = item['@microsoft.graph.downloadUrl'];
         if (!url || new URL(url).protocol !== 'https:')
             throw new Error('安全なダウンロードURLを取得できませんでした。');
-        // A short-lived preauthenticated download URL MUST NOT receive the Graph bearer token.
-        const result = await this.httpWithReadTimeout(url, { method: 'GET', credentials: 'omit' });
-        if (!result.ok)
-            throw new Error(`OneDriveからの取得に失敗しました (HTTP ${result.status})。`);
-        if (Number(result.headers.get('Content-Length') ?? 0) > maxBytes)
-            throw new Error('ダウンロードがサイズ上限を超えています。');
-        // Stream when possible to bound memory before materializing a string.
-        if (result.body) {
-            const reader = result.body.getReader();
-            const chunks = [];
-            let length = 0;
-            try {
-                while (true) {
-                    const { value, done } = await reader.read();
-                    if (done)
-                        break;
-                    length += value.byteLength;
-                    if (length > maxBytes)
-                        throw new Error('ダウンロードがサイズ上限を超えています。');
-                    chunks.push(value);
-                }
-            }
-            finally {
-                reader.releaseLock();
-            }
-            const bytes = new Uint8Array(length);
-            let offset = 0;
-            for (const chunk of chunks) {
-                bytes.set(chunk, offset);
-                offset += chunk.byteLength;
-            }
-            return { text: new TextDecoder('utf-8', { fatal: true }).decode(bytes), item };
-        }
-        const text = await result.text();
-        if (new TextEncoder().encode(text).byteLength > maxBytes)
-            throw new Error('ダウンロードがサイズ上限を超えています。');
-        return { text, item };
+        // Signed download URLs are unauthenticated. Keep the 30-second deadline
+        // active until the entire body has been consumed, not merely until headers.
+        const bytes = await this.withReadDeadline(url, { method: 'GET', credentials: 'omit' }, async (response) => {
+            if (!response.ok)
+                throw new Error(`OneDriveからの取得に失敗しました (HTTP ${response.status})。`);
+            return this.readResponseBytes(response, maxBytes);
+        });
+        return { text: new TextDecoder('utf-8', { fatal: true }).decode(bytes), item };
     }
     async downloadItem(id, maxBytes) {
         return (await this.downloadItemInfo(id, maxBytes)).text;

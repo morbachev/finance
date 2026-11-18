@@ -102,7 +102,16 @@ export async function graphClientWithoutRedirect():Promise<OneDriveTestClient> {
     throw new Error('Microsoftアカウントの認証を確認できません。必要な場合は「Microsoftアカウントを再接続」を選択してください。');
   }
 }
-export interface CloudHandlers {onRefresh():Promise<void>;onMigration():Promise<void>;onLock():boolean;onChangePassphrase(current:string,next:string,onProgress:(message:string)=>void):Promise<void>}
+export type CloudConnectPrompt = 'setup' | 'connect' | 'reconnect' | null;
+/** Only offer login after the account state is known; network failures are not sign-out. */
+export function cloudConnectPrompt():CloudConnectPrompt {
+  const id=$<HTMLInputElement>('cloud-client-id').value.trim();
+  if(!validId(id))return 'setup';
+  if(!msal||activeId!==id)return null;
+  if(!account())return 'connect';
+  return reauthenticationRequired?'reconnect':null;
+}
+export interface CloudHandlers {hasUnsavedChanges():boolean;onRefresh():Promise<void>;onMigration():Promise<void>;onLock():boolean;onChangePassphrase(current:string,next:string,onProgress:(message:string)=>void):Promise<void>}
 export function initCloudSettings(handlers:CloudHandlers):void {
   let id='';try{id=localStorage.getItem(CLIENT_KEY)??'';}catch{ /* private browsing */ }
   $<HTMLInputElement>('cloud-client-id').value=id;
@@ -131,11 +140,7 @@ export function initCloudSettings(handlers:CloudHandlers):void {
     }
     if(localStorage.getItem(CLIENT_KEY)!==value)throw new Error('先にClient IDを保存してください。');
     const instance=await ensureMsal();
-    if(account()) {
-      if(!window.confirm('Microsoftアカウントの認証をやり直します。接続先アカウントを確認し、未保存の編集がないことを確認してください。続行しますか？'))return;
-    } else {
-      if(!window.confirm('Microsoftログインへ移動します。未保存の編集がある場合は破棄されます。続行しますか？'))return;
-    }
+    if(handlers.hasUnsavedChanges() && !window.confirm('未保存の変更が失われます。続行しますか？'))return;
     // Always allow selection of the intended account. No vault data is created or deleted.
     await instance.loginRedirect({scopes:SCOPES,prompt:'select_account'});
   });});

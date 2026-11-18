@@ -33,7 +33,7 @@ test('Payroll history matches the active Finance UI: accessible history or three
 });
 
 test('Settings exposes only sync diagnostics rather than salary amounts', () => {
-  const payrollSection = settings.slice(0, settings.indexOf('id="cloud-view"'));
+  const payrollSection = settings.slice(settings.indexOf('id="settings-payroll-disclosure"'), settings.indexOf('<footer>'));
   assert.doesNotMatch(payrollSection, /総手取り|月別の給与実績|assets-payroll-net|amounts\.netPay/);
   assert.match(payrollSection, /id="assets-payroll-count"/);
   assert.match(payrollSection, /id="assets-payroll-last"/);

@@ -122,6 +122,17 @@ export async function graphClientWithoutRedirect() {
         throw new Error('Microsoftアカウントの認証を確認できません。必要な場合は「Microsoftアカウントを再接続」を選択してください。');
     }
 }
+/** Only offer login after the account state is known; network failures are not sign-out. */
+export function cloudConnectPrompt() {
+    const id = $('cloud-client-id').value.trim();
+    if (!validId(id))
+        return 'setup';
+    if (!msal || activeId !== id)
+        return null;
+    if (!account())
+        return 'connect';
+    return reauthenticationRequired ? 'reconnect' : null;
+}
 export function initCloudSettings(handlers) {
     let id = '';
     try {
@@ -173,14 +184,8 @@ export function initCloudSettings(handlers) {
             if (localStorage.getItem(CLIENT_KEY) !== value)
                 throw new Error('先にClient IDを保存してください。');
             const instance = await ensureMsal();
-            if (account()) {
-                if (!window.confirm('Microsoftアカウントの認証をやり直します。接続先アカウントを確認し、未保存の編集がないことを確認してください。続行しますか？'))
-                    return;
-            }
-            else {
-                if (!window.confirm('Microsoftログインへ移動します。未保存の編集がある場合は破棄されます。続行しますか？'))
-                    return;
-            }
+            if (handlers.hasUnsavedChanges() && !window.confirm('未保存の変更が失われます。続行しますか？'))
+                return;
             // Always allow selection of the intended account. No vault data is created or deleted.
             await instance.loginRedirect({ scopes: SCOPES, prompt: 'select_account' });
         });

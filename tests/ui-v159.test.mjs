@@ -18,24 +18,25 @@ test('forecast comparison offers independent cash/NISA checkboxes with optional 
   assert.match(future,/cashScenarioMonthly:changesCash\?amount:null/);
   assert.match(future,/nisaScenarioMonthly:changesNisa\?scenarioNisaAmount:null/);
 });
-test('one disclosure has no doubled arrow and NISA amount sits above return range',()=>{
-  const amount=html.indexOf('id="future-nisa-monthly"'),rate=html.indexOf('id="future-nisa-rate"');
-  assert.ok(amount>0&&rate>amount);
+test('forecast keeps annual return control, but derives baseline NISA from recorded data',()=>{
+  assert.doesNotMatch(html,/id="future-nisa-monthly"/);
+  assert.match(html,/id="future-nisa-rate"/);
   assert.match(css,/#future-scenario-accordion>summary::after/);
-  assert.match(css,/content:""!important/);
-  assert.match(css,/transform:none!important/);
+  assert.match(future,/suggestedNisaMonthly\(source.assets,source.records,localToday\(\)\)/);
+  assert.match(future,/nisaMonthly:hasNisaSchedule\?0:suggested.amount/);
 });
-test('bank linking shows both forms in one two-column disclosure while retaining distinct save actions',()=>{
+test('NISA linkage and birth month live in settings, distinct from bank debit mapping',()=>{
   const start=html.indexOf('<details class="assets-links-panel panel" id="assets-card-links">');
   const end=html.indexOf('</details>',start);
   const section=html.slice(start,end);
   assert.ok(start>0&&end>start);
-  assert.match(section,/id="assets-nisa-link-form"/);
+  assert.doesNotMatch(section,/id="assets-nisa-link-form"/);
   assert.match(section,/id="assets-card-debits-form"/);
-  assert.match(section,/id="assets-nisa-save"/);
-  assert.match(section,/引落口座を保存/);
-  assert.equal((section.match(/<summary>/g)||[]).length,1);
-  assert.match(css,/\.assets-links-grid\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  const settings=html.slice(html.indexOf('id="settings-nisa-panel"'),html.indexOf('class="panel assets-payroll-panel"'));
+  assert.match(settings,/id="assets-nisa-link-form"/);
+  assert.match(settings,/id="assets-birth-form"/);
+  assert.match(settings,/id="assets-nisa-save"/);
+  assert.match(settings,/id="assets-birth-save"/);
   assert.match(css,/\.assets-links-panel:not\(\[open\]\)>\.assets-links-grid\{display:none!important\}/);
 });
 test('Mizuho prediction closed in details yet its form and controls remain available',()=>{

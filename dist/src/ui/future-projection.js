@@ -78,7 +78,7 @@ function drawChart(container, points, born, compare) {
         legend.append(el('span', `future-legend-item future-legend-${cls}`, name));
     container.append(legend);
 }
-export function initFutureProjection(getSource, saveBirthMonth) {
+export function initFutureProjection(getSource) {
     const find = (id) => {
         const n = document.getElementById(id);
         if (!n)
@@ -86,12 +86,10 @@ export function initFutureProjection(getSource, saveBirthMonth) {
         return n;
     };
     const target = find('future-target');
-    const born = find('future-born');
     const age = find('future-age');
     const from = find('future-change-month');
     const saving = find('future-saving-amount');
     const nisaScenarioInput = find('future-scenario-nisa');
-    const nisaMonthly = find('future-nisa-monthly');
     const nisaRate = find('future-nisa-rate');
     const results = find('future-results');
     const scenarioPanel = find('future-scenario-settings');
@@ -132,48 +130,27 @@ export function initFutureProjection(getSource, saveBirthMonth) {
     saving.value = '20000';
     nisaScenarioInput.value = '20000';
     nisaRate.value = '3';
-    let defaultNisaMonthly = 0;
-    let nisaEdited = false;
     let scenarioCashEdited = false;
     let scenarioNisaEdited = false;
-    let bornEdited = false;
-    let bornSaving = false;
+    let lastBirthMonth = null;
+    const birthSettings = find('future-birth-settings');
+    birthSettings.addEventListener('click', () => {
+        document.getElementById('nav-settings')?.click();
+        document.getElementById('settings-nisa-panel')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    });
     const moneyField = (input) => input.value.trim() && Number.isSafeInteger(Number(input.value)) && Number(input.value) >= 0 ? Number(input.value) : null;
     const monthlyEquivalent = (entries) => Math.round(entries.reduce((sum, e) => sum + (e.frequency === 'monthly' ? e.amount : e.frequency === 'weekly' ? e.amount * 52 / 12 : e.amount / 12), 0));
     const updateAgeTarget = () => {
-        const calculated = targetMonthForAge(born.value, Number(age.value));
+        const calculated = targetMonthForAge(getSource()?.assets.birthMonth ?? '', Number(age.value));
         if (calculated)
             target.value = calculated;
         render();
     };
     age.addEventListener('input', updateAgeTarget);
-    born.addEventListener('input', () => { bornEdited = true; updateAgeTarget(); });
     nisaRate.addEventListener('input', render);
     from.addEventListener('input', render);
     saving.addEventListener('input', () => { scenarioCashEdited = true; render(); });
     nisaScenarioInput.addEventListener('input', () => { scenarioNisaEdited = true; render(); });
-    nisaMonthly.addEventListener('input', () => { nisaEdited = true; render(); });
-    find('future-born-save').addEventListener('click', () => {
-        if (bornSaving)
-            return;
-        const val = born.value;
-        if (!/^(19|20|21)\d{2}-(0[1-9]|1[0-2])$/.test(val) || val > localToday().slice(0, 7)) {
-            find('future-born-status').textContent = '生年月を確認してください。';
-            return;
-        }
-        bornSaving = true;
-        const button = find('future-born-save');
-        button.disabled = true;
-        find('future-born-status').textContent = '保存中…';
-        void saveBirthMonth(val).then(() => {
-            bornEdited = false;
-            find('future-born-status').textContent = '保存しました。';
-            render();
-        }).catch(err => { find('future-born-status').textContent = `保存失敗：${err instanceof Error ? err.message : '通信エラー'}`; }).finally(() => {
-            bornSaving = false;
-            button.disabled = false;
-        });
-    });
     function makeMetric(title, value, style, sub) {
         const card = el('div', `future-metric future-metric-${style}`);
         const label = el('div', 'future-metric-label');
@@ -190,33 +167,27 @@ export function initFutureProjection(getSource, saveBirthMonth) {
             hint.textContent = 'OneDrive保管庫の解除後に将来資産を試算できます。';
             return;
         }
-        if (!bornEdited && source.assets.birthMonth && born.value !== source.assets.birthMonth) {
-            born.value = source.assets.birthMonth;
-            const endMonth = targetMonthForAge(born.value, Number(age.value));
-            if (endMonth)
-                target.value = endMonth;
+        const birthMonth = source.assets.birthMonth ?? '';
+        if (lastBirthMonth !== birthMonth) {
+            lastBirthMonth = birthMonth;
+            const calculated = targetMonthForAge(birthMonth, Number(age.value));
+            target.value = calculated ?? incrementYearMonth(localToday().slice(0, 7), 18);
         }
+        age.disabled = !birthMonth;
+        birthSettings.hidden = !!birthMonth;
         find('future-age-value').textContent = `${age.value}歳`;
         find('future-nisa-rate-value').textContent = `${Number(nisaRate.value).toFixed(1)}%`;
-        find('future-target-label').textContent = born.value ? `${dateTitle(target.value)}（${age.value}歳）` : '生年月を入力すると年齢で予測できます';
+        find('future-target-label').textContent = birthMonth ? `${dateTitle(target.value)}（${age.value}歳）` : '生年月未設定';
+        if (!birthMonth) {
+            hint.textContent = '生年月を設定してください。';
+            return;
+        }
         const cashRules = source.assets.recurring.filter(e => e.enabled && e.toAccountId === 'cash-savings' && e.fromAccountId !== 'cash-savings' && (e.kind === 'transfer' || e.kind === 'income'));
         const nisaRules = source.assets.recurring.filter(e => e.enabled && e.toAccountId === 'nisa' && (e.kind === 'income' || e.kind === 'transfer'));
         const hasNisaSchedule = nisaRules.length > 0;
         const suggested = suggestedNisaMonthly(source.assets, source.records, localToday());
-        if (hasNisaSchedule) {
-            nisaMonthly.value = '0';
-            nisaMonthly.disabled = true;
-            defaultNisaMonthly = 0;
-        }
-        else {
-            nisaMonthly.disabled = false;
-            if (!nisaEdited) {
-                nisaMonthly.value = String(suggested.amount);
-                defaultNisaMonthly = suggested.amount;
-            }
-        }
         const cashMonthly = monthlyEquivalent(cashRules);
-        const nisaBase = hasNisaSchedule ? monthlyEquivalent(nisaRules) : Number(nisaMonthly.value) || 0;
+        const nisaBase = hasNisaSchedule ? monthlyEquivalent(nisaRules) : suggested.amount;
         if (!scenarioCashEdited)
             saving.value = String(Math.ceil((cashMonthly + 5000) / 5000) * 5000);
         if (!scenarioNisaEdited)
@@ -224,11 +195,11 @@ export function initFutureProjection(getSource, saveBirthMonth) {
         find('future-scenario-hint').textContent = `現在の月額目安：現金 ${yen(cashMonthly)} · NISA ${yen(nisaBase)}`;
         const todayValue = localToday();
         const todayPeriod = todayValue.slice(0, 7);
-        const amount = moneyField(saving), scenarioNisaAmount = moneyField(nisaScenarioInput), nisaAmount = moneyField(nisaMonthly);
+        const amount = moneyField(saving), scenarioNisaAmount = moneyField(nisaScenarioInput);
         const changesCash = compare && cashChoice.checked;
         const changesNisa = compare && nisaChoice.checked;
         if (!target.value || target.value < todayPeriod || !from.value || from.value < todayPeriod ||
-            !Number.isFinite(Number(nisaRate.value)) || nisaAmount === null ||
+            !Number.isFinite(Number(nisaRate.value)) ||
             (changesCash && amount === null) || (changesNisa && scenarioNisaAmount === null)) {
             hint.textContent = '年月と積立額を確認してください。';
             return;
@@ -236,7 +207,7 @@ export function initFutureProjection(getSource, saveBirthMonth) {
         try {
             const report = futureProjection(source.assets, source.records, {
                 today: todayValue, targetMonth: target.value, changeMonth: from.value, savingsRuleId: null,
-                savingsAmount: amount ?? 0, nisaMonthly: hasNisaSchedule ? 0 : nisaAmount, nisaAnnualReturn: Number(nisaRate.value) / 100,
+                savingsAmount: amount ?? 0, nisaMonthly: hasNisaSchedule ? 0 : suggested.amount, nisaAnnualReturn: Number(nisaRate.value) / 100,
                 cashScenarioMonthly: changesCash ? amount : null,
                 nisaScenarioMonthly: changesNisa ? scenarioNisaAmount : null,
             });
@@ -255,7 +226,7 @@ export function initFutureProjection(getSource, saveBirthMonth) {
             if (report.cashStart === null || report.nisaStart === null)
                 results.append(el('p', 'future-warning', '口座管理で現在の残高を登録してください。'));
             const graph = el('div', 'future-chart');
-            drawChart(graph, report.points, born.value, compare);
+            drawChart(graph, report.points, birthMonth, compare);
             results.append(graph);
             const tableWrap = el('div', 'future-table-scroll');
             const table = document.createElement('table');
@@ -271,8 +242,8 @@ export function initFutureProjection(getSource, saveBirthMonth) {
             const selected = report.points.filter((p, i) => i === 0 || i === report.points.length - 1 || p.month.endsWith('-12'));
             for (const point of selected) {
                 const row = document.createElement('tr');
-                const vals = compare ? [dateTitle(point.month) + ageText(point.month, born.value), yen(point.cash), yen(point.nisa), yen(point.combined), yen(point.combinedScenario)]
-                    : [dateTitle(point.month) + ageText(point.month, born.value), yen(point.cash), yen(point.nisa), yen(point.combined)];
+                const vals = compare ? [dateTitle(point.month) + ageText(point.month, birthMonth), yen(point.cash), yen(point.nisa), yen(point.combined), yen(point.combinedScenario)]
+                    : [dateTitle(point.month) + ageText(point.month, birthMonth), yen(point.cash), yen(point.nisa), yen(point.combined)];
                 for (const value of vals)
                     row.append(el('td', '', value));
                 tbody.append(row);
@@ -286,18 +257,17 @@ export function initFutureProjection(getSource, saveBirthMonth) {
         }
     }
     const reset = () => {
-        born.value = '';
-        bornEdited = false;
+        lastBirthMonth = null;
+        age.disabled = true;
+        birthSettings.hidden = false;
         target.value = incrementYearMonth(localToday().slice(0, 7), 18);
         from.value = monthAfter(localToday().slice(0, 7));
         saving.value = '20000';
         nisaScenarioInput.value = '20000';
         scenarioCashEdited = false;
         scenarioNisaEdited = false;
-        nisaEdited = false;
-        nisaMonthly.value = '';
         results.replaceChildren();
-        hint.textContent = '保管庫を解除してください.';
+        hint.textContent = '保管庫を解除してください。';
         compare = false;
         scenarioAccordion.open = false;
         scenarioPanel.hidden = true;

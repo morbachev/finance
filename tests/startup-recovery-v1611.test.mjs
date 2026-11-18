@@ -24,8 +24,10 @@ test('navigation is connected before complex setup and automatic auth never redi
 
 test('network read deadline does not time out writes or silently retry them',()=>{
   assert.match(api,/if\(\(init\.method\?\?'GET'\)\.toUpperCase\(\)!=='GET'\)return this\.http\(url,init\)/);
-  assert.match(api,/setTimeout\(\(\)=>controller\.abort\(\),30000\)/);
-  assert.match(api,/this\.httpWithReadTimeout\(url, \{ method:'GET', credentials:'omit' \}\)/);
+  assert.match(api,/withReadDeadline/);
+  assert.match(api,/controller\.abort\(\)/);
+  assert.match(api,/readResponseBytes\(response,maxBytes\)/);
+  assert.match(api,/credentials:'omit'/);
 });
 
 test('independent recovery script remains available when main application fails to load',async()=>{

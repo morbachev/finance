@@ -3,7 +3,7 @@ import { parseStatementText } from './importers/statement-parser.js';
 import { parsePdfFile } from './importers/pdf-reader.js';
 import { planStatementImport, statementSignature } from './importers/import-policy.js';
 import { hasVault, unlockVault, readStatements, readOriginal } from './storage/encrypted-vault.js';
-import { graphClientWithoutRedirect, initCloudSettings } from './cloud/cloud-settings.js';
+import { graphClientWithoutRedirect, initCloudSettings, cloudConnectPrompt } from './cloud/cloud-settings.js';
 import { LiveVault, CloudWriteUncertainError } from './cloud/live-vault.js';
 import { clearTabSession, readTabSession, saveTabSession } from './cloud/tab-session.js';
 import { displayMerchant, matchingRule, sortedRules, normalizeMerchant, PALETTE } from './cloud/merchant-rules.js';
@@ -444,6 +444,75 @@ function makeInput(value, className, update, ariaLabel) {
     return input;
 }
 function renderSortControls() {
+    const connectionDialog = $('cloud-connect-dialog');
+    $('cloud-connect-later').addEventListener('click', () => {
+        cloudConnectDismissed = true;
+        connectionDialog.close();
+    });
+    connectionDialog.addEventListener('cancel', () => { cloudConnectDismissed = true; });
+    $('cloud-connect-continue').addEventListener('click', () => {
+        const mode = connectionDialog.dataset.mode;
+        cloudConnectDismissed = true;
+        connectionDialog.close();
+        if (mode === 'setup') {
+            showView('settings');
+            $('cloud-advanced').open = true;
+            $('cloud-client-id').focus();
+            return;
+        }
+        $('cloud-login').click();
+    });
+    $('cloud-resume-batch').addEventListener('click', () => {
+        void (async () => {
+            if (!liveVault?.unlocked || !liveVault.hasPendingYearBatch || batchBusy || filesBusy)
+                return;
+            const list = liveVault.pendingYearBatchEntries();
+            const fingerprint = (s) => JSON.stringify(s);
+            if (list.some(item => statements.some(s => {
+                const id = savedIds.get(s) ?? pendingCloudIds.get(s);
+                return id === item.id && fingerprint(s) !== fingerprint(item.statement);
+            }))) {
+                operationResult('編集中の明細があります。変更を確認してから保存してください。', 'warn');
+                return;
+            }
+            batchBusy = true;
+            updateCloudStatus();
+            render();
+            try {
+                await liveVault.resumePendingYearBatch();
+                const records = liveVault.records();
+                for (const s of statements) {
+                    const id = savedIds.get(s) ?? pendingCloudIds.get(s);
+                    if (!id || !list.some(item => item.id === id))
+                        continue;
+                    const stored = records.find(r => r.id === id);
+                    if (!stored || fingerprint(stored.statement) !== fingerprint(s))
+                        continue;
+                    savedIds.set(s, id);
+                    savedFingerprints.set(s, statementWorkingFingerprint(s));
+                    dirty.delete(s);
+                    importStaged.delete(s);
+                    pendingSources.delete(s);
+                    if (stored.originalId)
+                        originalSaved.add(s);
+                }
+                if (!pending().length)
+                    replaceCloudRecords(records);
+                renderRules();
+                assetsUi?.render();
+                futureUi?.render();
+                operationResult('保存を完了しました。', 'good');
+            }
+            catch (error) {
+                operationResult(error instanceof Error ? error.message : '保存を再開できませんでした。', 'warn');
+            }
+            finally {
+                batchBusy = false;
+                updateCloudStatus();
+                render();
+            }
+        })();
+    });
     for (const [key, id] of [['usedOn', 'sort-date'], ['amount', 'sort-amount']]) {
         const button = $(id);
         const direction = previewSort?.key === key ? previewSort.direction : null;
@@ -570,6 +639,7 @@ function updateCloudStatus(message) {
     const failure = message && /失敗|エラー|不備|接続してください|未保存|更新確認/.test(message);
     bar.textContent = failure ? message : liveVault?.unlocked ? '' : `OneDrive：${state}`;
     $('cloud-live-migrate').classList.toggle('hidden', !liveVault);
+    $('cloud-resume-batch').classList.toggle('hidden', !liveVault?.hasPendingYearBatch);
 }
 /** The values are shown only in a local browser confirmation, never transmitted. */
 const collisionLabel = {
@@ -594,6 +664,21 @@ function confirmCloudConflicts(title, rows) {
     const details = rows.slice(0, 5).map(item => `・${item.label} / ${collisionLabel[item.field] ?? item.field}\n  この端末：${item.local}\n  OneDrive：${item.remote}`).join('\n');
     const suffix = rows.length > 5 ? `\nほか${rows.length - 5}項目` : '', info = `${title}（${rows.length}件）\n${details}${suffix}\n\n［OK］この端末の変更を採用して保存\n［キャンセル］保存せずOneDriveの値を保持`;
     return window.confirm(info);
+}
+let cloudConnectDismissed = false;
+function showCloudConnectDialog(mode) {
+    if (!mode || cloudConnectDismissed)
+        return;
+    const dialog = $('cloud-connect-dialog');
+    if (dialog.open || document.querySelector('dialog[open]'))
+        return;
+    const setup = mode === 'setup';
+    $('cloud-connect-title').textContent = setup ? 'OneDriveの設定' : mode === 'reconnect' ? 'OneDriveに再接続' : 'OneDriveに接続';
+    $('cloud-connect-copy').textContent = setup ? '接続設定を完了してください。' : 'Microsoftアカウントで接続してください。';
+    $('cloud-connect-continue').textContent = setup ? '設定を開く' : mode === 'reconnect' ? '再接続' : 'Microsoftアカウントで接続';
+    dialog.dataset.mode = mode;
+    dialog.showModal();
+    $('cloud-connect-continue').focus();
 }
 async function startCloud() {
     if (cloudStartupRunning || liveVault?.unlocked)
@@ -656,6 +741,7 @@ async function startCloud() {
         if (!readLastView(sessionStorageSafe()))
             showView('settings');
         updateCloudStatus(`OneDriveに接続してください：${error instanceof Error ? error.message : '接続エラー'}`);
+        showCloudConnectDialog(cloudConnectPrompt());
     }
     finally {
         clearTimeout(slowNotice);
@@ -1711,8 +1797,7 @@ function init() {
         if (sidebar?.classList.contains('mobile-open') && event.target instanceof Node && !sidebar.contains(event.target))
             setMobileMenuOpen(false);
     });
-    futureUi = initFutureProjection(() => !liveVault?.unlocked ? null : { assets: liveVault.assetSettings(), records: liveVault.records() }, async (birthMonth) => { if (!liveVault?.unlocked)
-        throw Error('保管庫を解除してください。'); await liveVault.setBirthMonth(birthMonth); });
+    futureUi = initFutureProjection(() => !liveVault?.unlocked ? null : { assets: liveVault.assetSettings(), records: liveVault.records() });
     assetsUi = initAssetsSettings(() => liveVault, categories, message => {
         operationResult(message);
         summaryUi?.render();
@@ -1769,6 +1854,7 @@ function init() {
         })();
     });
     initCloudSettings({
+        hasUnsavedChanges: () => Boolean(pending().length || failedImports.length || assetsUi?.isDirty() || assetsUi?.isBusy() || rulesBusy || categorySaving || batchBusy || filesBusy || autoSaveTimer),
         onChangePassphrase: async (current, next, onProgress) => {
             if (!liveVault?.unlocked)
                 throw new Error('先にOneDrive保管庫をロック解除してください。');

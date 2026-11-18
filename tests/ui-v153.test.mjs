@@ -14,8 +14,8 @@ test('three account cards share one details panel, not per-card footnotes',()=>{
   assert.match(css,/assets-account-grid\{align-items:stretch!important\}/);
   assert.doesNotMatch(assets,/label\.append\(make\('small','assets-balance-hint'/);
 });
-test('bank card account form is under NISA and outside the monthly summary',()=>{
-  assert.ok(html.indexOf('id="assets-nisa-link"')<html.indexOf('id="assets-card-debits"'));
+test('bank card account form stays in accounts and NISA linkage is in settings',()=>{
+  assert.ok(html.indexOf('id="assets-card-debits"')<html.indexOf('id="settings-nisa-panel"'));
   assert.ok(html.indexOf('id="assets-card-debits"')<html.indexOf('id="assets-recurring-form"'));
   assert.match(assets,/async function saveCardDebitAccounts/);
   assert.match(assets,/await requireVault\(\)\.setCardDebitAccounts\(values\)/);

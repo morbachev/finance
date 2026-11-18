@@ -10,12 +10,14 @@ const settingsStart=html.indexOf('<div id="settings-view"');
 const sidebarEnd=html.indexOf('</aside>');
 test('account management and recurring payments reside in their own route, not application settings',()=>{
   assert.ok(viewStart > 0 && settingsStart > viewStart);
-  for(const id of ['assets-balances-form','assets-nisa-link-form','assets-recurring-form','assets-recurring-list']){
+  for(const id of ['assets-balances-form','assets-recurring-form','assets-recurring-list']){
     const at=html.indexOf(`id="${id}"`);
     assert.ok(at > viewStart && at < settingsStart,id);
     assert.equal(html.split(`id="${id}"`).length-1,1);
   }
   assert.ok(html.indexOf('id="cloud-view"') > settingsStart);
+  assert.ok(html.indexOf('id="assets-nisa-link-form"') > settingsStart);
+  assert.ok(html.indexOf('id="assets-birth-form"') > settingsStart);
   assert.ok(!html.slice(settingsStart).includes('id="assets-balances-form"'));
   assert.match(main,/\$\('assets-page'\)\.classList\.toggle\('hidden', view !== 'assets'\)/);
   assert.match(main,/\$\('nav-assets'\)\.addEventListener/);

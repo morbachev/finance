@@ -45,6 +45,8 @@ export class LiveVault {
   // An ambiguous write must never be retried from a stale in-memory base.
   private rulesNeedRefresh=false;
   private assetsNeedRefresh=false;
+  /** In-memory retry plan. Sensitive cleartext is never stored in browser storage. */
+  private pendingYearBatch:{items:Array<{id:string;statement:ParsedStatement;source?:LocalSource}>;before:Map<string,CloudRecord|null>;ids:string[]}|null=null;
   private hasRemote=false;
   private sessionExportable=false;
   private hasLegacy=false;
@@ -90,6 +92,10 @@ export class LiveVault {
   get isRotating():boolean{return this.rotating;}
   get exists():boolean{return this.hasRemote;}
   get needsLayoutMigration():boolean{return this.hasLegacy;}
+  get hasPendingYearBatch():boolean{return this.pendingYearBatch!==null;}
+  pendingYearBatchEntries():ReadonlyArray<{id:string;statement:ParsedStatement}> {
+    return this.pendingYearBatch?.items.map(item=>({id:item.id,statement:clone(item.statement)}))??[];
+  }
 
   records():CloudRecord[] {
     if(!this.key)throw new Error('クラウド保管庫はロックされています。');
@@ -124,7 +130,7 @@ export class LiveVault {
     return clone(this.assetsDocument);
   }
   conflicts():number{return [...this.shards.values()].reduce((count,s)=>count+s.document.conflicts.length,0);}
-  lock():void{this.mutationWarning=null;this.dataSetId=null;this.client.setVaultDataSet?.(null);this.key=null;this.salt='';this.sessionExportable=false;this.shards.clear();this.index=emptyIndex();this.rulesDocument=emptyRules();this.rulesRef=null;this.assetsDocument=emptyAssets();this.assetsRef=null;this.rulesNeedRefresh=false;this.assetsNeedRefresh=false;}
+  lock():void{this.mutationWarning=null;this.dataSetId=null;this.client.setVaultDataSet?.(null);this.key=null;this.salt='';this.sessionExportable=false;this.shards.clear();this.index=emptyIndex();this.rulesDocument=emptyRules();this.rulesRef=null;this.assetsDocument=emptyAssets();this.assetsRef=null;this.rulesNeedRefresh=false;this.assetsNeedRefresh=false;this.pendingYearBatch=null;}
   /** Export a key only after an explicit opt-in unlock; immediately make the working key non-extractable. */
   async exportTabKey():Promise<{salt:string;key:string;dataSetId:string|null}> {
     if(!this.key||!this.sessionExportable)throw new Error('セッション保存が有効ではありません。');
@@ -732,17 +738,20 @@ export class LiveVault {
     return doc;
   }
   async saveBatch(items:Array<{id?:string;statement:ParsedStatement;source?:LocalSource}>):Promise<string[]> {
+    if(this.pendingYearBatch)throw new CloudWriteUncertainError('未確認の保存があります。設定から保存を再開してください。',null);
     if(!this.key)throw new Error('先にOneDrive保管庫を解除してください。');
     await this.assertActiveGeneration();
     const key=this.key;
     const changes=new Map<YearBucket,CloudDocument>();
     const ids:string[]=[];
     const moves:Array<{id:string;from:YearBucket;to:YearBucket}>=[];
+    const before=new Map<string,CloudRecord|null>();
     for(const item of items) {
       let id=item.id??this.draftIds.get(item.statement);
       if(!id){id=crypto.randomUUID();this.draftIds.set(item.statement,id);}
       ids.push(id);
       const prior=this.records().find(r=>r.id===id);
+      before.set(id,prior?clone(prior):null);
       const previousBucket=this.findBucket(id);
       const year=statementBucket(item.statement.billingMonth);
       let originalId=prior?.originalId;
@@ -785,14 +794,74 @@ export class LiveVault {
         await this.commitYear(move.from,old);committedYears++;
       }
     }catch(error){
-      if(error instanceof CloudEditCancelledError && committedYears===0)throw error;
-      throw new CloudWriteUncertainError('一部または全部の明細は保存済みの可能性があります。再保存する前に最新データを取得して確認してください。',error);
+      if(committedYears===0&&(error instanceof CloudEditCancelledError||isDefiniteWriteRejection(error)))throw error;
+      this.pendingYearBatch={
+        items:items.map((item,i)=>({id:ids[i]!,statement:clone(item.statement),...(item.source?{source:item.source}:{})})),
+        before,ids:[...ids],
+      };
+      throw new CloudWriteUncertainError('一部の明細は保存済みの可能性があります。設定から保存を再開してください。',error);
     }
     try{await this.refresh();}
     catch{this.mutationWarning='OneDriveへの保存は確認できましたが、最後の最新データ取得に失敗しました。通信回復後に取得してください。';}
     return ids;
   }
+  /** Reconcile before retrying a partial year batch. Never overwrite an intervening edit. */
+  async resumePendingYearBatch():Promise<string[]> {
+    if(!this.pendingYearBatch)throw new Error('再開する保存はありません。');
+    if(!this.key)throw new Error('保管庫を解除してください。');
+    const pending=this.pendingYearBatch;
+    // A failed read must leave the in-memory retry plan untouched.
+    await this.refresh();
+    const remaining:typeof pending.items=[];
+    const same=(a:unknown,b:unknown)=>JSON.stringify(a)===JSON.stringify(b);
+    for(const item of pending.items){
+      const before=pending.before.get(item.id)??null;
+      const actual=this.records().find(record=>record.id===item.id)??null;
+      const target=statementBucket(item.statement.billingMonth);
+      const copies=[...this.shards].filter(([,shard])=>shard.document.records.some(x=>x.id===item.id)).map(([year])=>year);
+      if(actual&&same(actual.statement,item.statement)&&copies.length===1&&copies[0]===target)
+        continue; // Already confirmed on OneDrive; do not write this year again.
+      if(actual&&same(actual.statement,item.statement)){
+        // Destination committed but old-year tombstone may be missing.
+        continue;
+      }
+      if(!same(actual,before))
+        throw new CloudEditCancelledError('他の端末で明細が更新されています。未完了の保存は上書きしません。');
+      remaining.push(item);
+    }
+    // Every item has either the exact intended remote statement or an unchanged
+    // original. Retry only unfinished records, keeping their original IDs.
+    this.pendingYearBatch=null;
+    try {
+      if(remaining.length)await this.saveBatch(remaining);
+      // Cleanup of old-year copies is separate and runs only after destination
+      // records are present. This also handles a move to an *earlier* year.
+      await this.refresh();
+      for(const item of pending.items){
+        const target=statementBucket(item.statement.billingMonth);
+        const confirmed=this.shards.get(target)?.document.records.find(r=>r.id===item.id);
+        if(!confirmed||!same(confirmed.statement,item.statement))
+          throw new Error('保存先の明細を確認できませんでした。');
+        await this.registerYear(target);
+        for(const [year,shard] of [...this.shards]){
+          if(year===target||!shard.document.records.some(r=>r.id===item.id))continue;
+          const changed=clone(shard.document);
+          changed.records=changed.records.filter(r=>r.id!==item.id);
+          if(!changed.deleted.includes(item.id))changed.deleted.push(item.id);
+          await this.commitYear(year,changed);
+        }
+      }
+      await this.refresh();
+      return pending.ids;
+    }catch(error){
+      // If a retry failed after an upload, retain the original plan so a later
+      // verified refresh can reconcile all copies rather than blindly resubmit.
+      this.pendingYearBatch=pending;
+      throw error instanceof CloudWriteUncertainError?error:new CloudWriteUncertainError('保存結果を確認できません。再接続後に保存を再開してください。',error);
+    }
+  }
   async delete(id:string):Promise<void> {
+    if(this.pendingYearBatch)throw new CloudWriteUncertainError('未確認の保存があります。設定から保存を再開してください。',null);
     if(!this.key)throw new Error('先にOneDrive保管庫を解除してください。');
     await this.assertActiveGeneration();
     // Multiple copies can temporarily exist while moving billing months; remove all.

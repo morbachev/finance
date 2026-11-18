@@ -177,7 +177,10 @@ export function displayMerchant(original, cardId, rules, override) {
 }
 /** Three-way merge of independent rules and fields. Saving editor wins same-field ties,
  * and the other value is retained in the encrypted conflict log. Deletions use tombstones. */
-export function mergeRules(base, local, remote, now = new Date().toISOString()) {
+export function mergeRules(base, local, remote, now = new Date().toISOString(), collisionSink, preferLocalDeletes = false) {
+    const collided = (ruleId, field, local, remote) => {
+        collisionSink?.push({ ruleId, field, local: clone(local), remote: clone(remote) });
+    };
     const b = new Map(base.rules.map(r => [r.id, r]));
     const l = new Map(local.rules.map(r => [r.id, r]));
     const r = new Map(remote.rules.map(r => [r.id, r]));
@@ -194,13 +197,20 @@ export function mergeRules(base, local, remote, now = new Date().toISOString()) 
         if (same(rv, bv) || same(lv, rv))
             return lv === missing ? missing : clone(lv);
         if (lv === missing && rv !== missing) {
+            collided(id, path, '削除', rv);
+            if (preferLocalDeletes) {
+                conflicts.push({ ruleId: id, field: path, discarded: clone(rv), chosen: '削除', at: now });
+                return missing;
+            }
             conflicts.push({ ruleId: id, field: path, discarded: '削除', chosen: clone(rv), at: now });
             return clone(rv);
         }
         if (rv === missing && lv !== missing) {
+            collided(id, path, lv, '削除');
             conflicts.push({ ruleId: id, field: path, discarded: '削除', chosen: clone(lv), at: now });
             return clone(lv);
         }
+        collided(id, path, lv, rv);
         conflicts.push({ ruleId: id, field: path, discarded: clone(rv), chosen: clone(lv), at: now });
         return clone(lv);
     };
@@ -216,6 +226,12 @@ export function mergeRules(base, local, remote, now = new Date().toISOString()) 
                 deleted.add(id);
                 continue;
             }
+            collided(id, 'rule', '削除', rv);
+            if (preferLocalDeletes) {
+                conflicts.push({ ruleId: id, field: 'rule', discarded: clone(rv), chosen: '削除', at: now });
+                deleted.add(id);
+                continue;
+            }
             conflicts.push({ ruleId: id, field: 'rule', discarded: '削除', chosen: clone(rv), at: now });
             result.push(clone(rv));
             deleted.delete(id);
@@ -226,6 +242,7 @@ export function mergeRules(base, local, remote, now = new Date().toISOString()) 
                 deleted.add(id);
                 continue;
             }
+            collided(id, 'rule', lv, '削除');
             conflicts.push({ ruleId: id, field: 'rule', discarded: '削除', chosen: clone(lv), at: now });
             result.push(clone(lv));
             deleted.delete(id);
@@ -278,6 +295,12 @@ export function mergeRules(base, local, remote, now = new Date().toISOString()) 
                 deletedCategories.add(id);
                 continue;
             }
+            collided(`category:${id}`, 'delete', deletedL ? '削除' : survivor, deletedR ? '削除' : survivor);
+            if (deletedL && preferLocalDeletes) {
+                conflicts.push({ ruleId: `category:${id}`, field: 'delete', discarded: clone(survivor), chosen: '削除', at: now });
+                deletedCategories.add(id);
+                continue;
+            }
             conflicts.push({ ruleId: `category:${id}`, field: 'delete', discarded: '削除', chosen: clone(survivor), at: now });
             deletedCategories.delete(id);
         }
@@ -305,6 +328,7 @@ export function mergeRules(base, local, remote, now = new Date().toISOString()) 
     const effective = new Set(listCategories({ categoryColors: colors, categoryDefinitions, deletedCategories: [...deletedCategories] }).map(item => item.id));
     for (const rule of result) {
         if (rule.categoryId && !effective.has(rule.categoryId)) {
+            collided(rule.id, 'categoryId', null, rule.categoryId);
             conflicts.push({ ruleId: rule.id, field: 'categoryId', discarded: rule.categoryId, chosen: null, at: now });
             rule.categoryId = null;
         }
@@ -314,4 +338,10 @@ export function mergeRules(base, local, remote, now = new Date().toISOString()) 
         ...(hasColors ? { categoryColors: colors } : {}),
         ...(categoryDefinitions.length ? { categoryDefinitions } : {}),
         ...(deletedCategories.size ? { deletedCategories: [...deletedCategories] } : {}) });
+}
+/** Same-field/category collision detector; disjoint additions and edits pass freely. */
+export function detectRuleEditCollisions(base, local, remote) {
+    const collisions = [];
+    mergeRules(base, local, remote, new Date().toISOString(), collisions);
+    return collisions;
 }

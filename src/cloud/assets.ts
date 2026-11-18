@@ -267,7 +267,7 @@ export function detectAssetsEditCollisions(base:AssetsDocument,local:AssetsDocum
 /** Merge independent additions, removals and field edits from two devices. Concurrent
  * same-field edits prefer the saving device ONLY after explicit user approval in LiveVault.
  * This pure function retains old merge behavior for compatibility with existing audit data. */
-export function mergeAssets(base:AssetsDocument,local:AssetsDocument,remote:AssetsDocument,now=new Date().toISOString()):AssetsDocument {
+export function mergeAssets(base:AssetsDocument,local:AssetsDocument,remote:AssetsDocument,now=new Date().toISOString(),preferLocalDeletes=false):AssetsDocument {
   const conflicts=[...remote.conflicts];
   for(const c of local.conflicts)if(!conflicts.some(x=>same(x,c)))conflicts.push(clone(c));
   const mergeGroup=<T extends {id:string}>(b:T[],l:T[],r:T[],bDeleted:string[],lDeleted:string[],rDeleted:string[],fields:(keyof T)[])=>{
@@ -278,6 +278,9 @@ export function mergeAssets(base:AssetsDocument,local:AssetsDocument,remote:Asse
       if(lDeleted.includes(id)&&(!rv||same(bv,rv))){deleted.add(id);continue;}
       if(rDeleted.includes(id)&&(!lv||same(bv,lv))){deleted.add(id);continue;}
       if(lDeleted.includes(id)&&rv&&!same(rv,bv)){
+        if(preferLocalDeletes){
+          conflicts.push({itemId:id,field:'delete',discarded:clone(rv),chosen:'削除',at:now});deleted.add(id);continue;
+        }
         conflicts.push({itemId:id,field:'delete',discarded:'削除',chosen:clone(rv),at:now});entries.push(clone(rv));deleted.delete(id);continue;
       }
       if(rDeleted.includes(id)&&lv&&!same(lv,bv)){
@@ -350,4 +353,50 @@ export function mergeAssets(base:AssetsDocument,local:AssetsDocument,remote:Asse
     deletedSnapshots:snapshots.deleted,deletedRecurring:recurring.deleted,conflicts:conflicts.slice(-200),nisaCardRule,payrollDepositAccount,payrollAutoPassphrase,
     ...(birthMonth?{birthMonth}:{}),...(Object.keys(accounts).length?{cardDebitAccounts:accounts}:{}),...(plan?{mizuhoTransferPlan:plan}:{}),...(base.oneTime!==undefined||local.oneTime!==undefined||remote.oneTime!==undefined?{oneTime:oneTimes.entries}:{}),
     ...(base.deletedOneTime!==undefined||local.deletedOneTime!==undefined||remote.deletedOneTime!==undefined?{deletedOneTime:oneTimes.deleted}:{})});
+}
+
+/** Human-readable, tab-local conflict comparison. Never expose stored credentials. */
+export interface AssetsEditDetail { itemId:string; field:string; label:string; localValue:string; remoteValue:string }
+export function describeAssetsEditCollisions(base:AssetsDocument,local:AssetsDocument,remote:AssetsDocument,collisions:readonly AssetsEditCollision[]):AssetsEditDetail[] {
+  const format=(field:string,value:unknown):string=>{
+    if(field==='payrollAutoPassphrase')return '（セキュリティ保護のため非表示）';
+    if(value===undefined||value===null||value==='')return '未設定';
+    if(value===true)return '有効';if(value===false)return '無効';
+    if(typeof value==='number')return Number.isFinite(value)?`${value.toLocaleString('ja-JP')}${['amount','balance'].includes(field)?'円':''}`:'不明';
+    if(typeof value==='string')return value.slice(0,65);
+    if(typeof value==='object')return JSON.stringify(value).slice(0,90);
+    return String(value).slice(0,65);
+  };
+  const find=(doc:AssetsDocument,id:string):BalanceSnapshot|RecurringEntry|OneTimeEntry|undefined=>
+    [...doc.snapshots,...doc.recurring,...(doc.oneTime??[])].find(entry=>entry.id===id);
+  return collisions.map(item=>{
+    const present=find(local,item.itemId)??find(remote,item.itemId)??find(base,item.itemId);
+    let label=item.itemId;
+    if(present){
+      if('accountId' in present)label=`${ASSET_ACCOUNTS.find(a=>a.id===present.accountId)?.name??present.accountId}・${present.observedAt.slice(0,10)}の残高`;
+      else if('date' in present)label=`${present.date}・${present.name}`;
+      else label=`定期入出金「${present.name}」`;
+    }else if(item.itemId==='mizuho-transfer-plan')label='みずほ送金予測';
+    else if(item.itemId==='card-debit-accounts')label=`カード引落口座（${CARDS.find(c=>c.id===item.field)?.name??item.field}）`;
+    else if(item.itemId==='nisa-card-rule')label='NISAのカード積立';
+    else if(item.itemId==='payroll-deposit-account')label='給与入金先';
+    else if(item.itemId==='payroll-auto-credential')label='給与自動取得の認証';
+    else if(item.itemId==='birth-month')label='生年月';
+    const entryFor=(doc:AssetsDocument)=>find(doc,item.itemId);
+    let left:unknown,right:unknown;
+    if(present){
+      if(item.field==='delete'){
+        left=entryFor(local)??'削除';right=entryFor(remote)??'削除';
+      }else{
+        left=(entryFor(local) as unknown as Record<string,unknown>|undefined)?.[item.field];
+        right=(entryFor(remote) as unknown as Record<string,unknown>|undefined)?.[item.field];
+      }
+    }else if(item.itemId==='card-debit-accounts'){
+      left=local.cardDebitAccounts?.[item.field];right=remote.cardDebitAccounts?.[item.field];
+    }else{
+      const name=item.field as keyof AssetsDocument;
+      left=local[name];right=remote[name];
+    }
+    return {itemId:item.itemId,field:item.field,label,localValue:format(item.field,left),remoteValue:format(item.field,right)};
+  });
 }

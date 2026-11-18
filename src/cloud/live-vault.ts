@@ -4,16 +4,25 @@ import type { ParsedStatement } from '../models/types.js';
 import type { LocalSource } from '../storage/encrypted-vault.js';
 import { OneDriveTestClient, GraphError } from './onedrive-api.js';
 import { decryptDocument, decryptIndex, decryptOriginal, deriveCloudKey, encryptDocument, encryptIndex, encryptOriginal, encryptRules, decryptRules, freshSalt, parseEnvelope, parseIndexEnvelope } from './cloud-crypto.js';
-import { emptyDocument, mergeDocuments, type CloudDocument, type CloudRecord } from './merge.js';
+import { emptyDocument, mergeDocuments, detectDocumentEditCollisions, type DocumentEditCollision, type CloudDocument, type CloudRecord } from './merge.js';
 import { emptyIndex, statementBucket, type FinanceIndex, type YearBucket, validateIndex } from './layout.js';
-import { emptyAssets, mergeAssets, detectAssetsEditCollisions, type AssetsEditCollision, validateSnapshot, validateRecurring, validateOneTime, type OneTimeEntry, type AssetsDocument, type AssetAccountId, type BalanceSnapshot, type RecurringEntry, type NisaCardRule, validateNisaCardRule, validatePayrollAutoPassphrase, validateBirthMonth, validateCardDebitAccounts } from './assets.js';
+import { emptyAssets, mergeAssets, detectAssetsEditCollisions, describeAssetsEditCollisions, type AssetsEditCollision, validateSnapshot, validateRecurring, validateOneTime, type OneTimeEntry, type AssetsDocument, type AssetAccountId, type BalanceSnapshot, type RecurringEntry, type NisaCardRule, validateNisaCardRule, validatePayrollAutoPassphrase, validateBirthMonth, validateCardDebitAccounts } from './assets.js';
 import { encryptAssets, decryptAssets } from './cloud-crypto.js';
-import { emptyRules, mergeRules, validateRule, validateCategory, listCategories, PALETTE, CATEGORIES, type CategoryDefinition, type CategoryId, type PaletteId, type MerchantRule, type MerchantRulesDocument } from './merchant-rules.js';
+import { emptyRules, mergeRules, detectRuleEditCollisions, type RuleEditCollision, validateRule, validateCategory, listCategories, PALETTE, CATEGORIES, type CategoryDefinition, type CategoryId, type PaletteId, type MerchantRule, type MerchantRulesDocument } from './merchant-rules.js';
 
 const clone=<T>(value:T):T=>structuredClone(value);
 type FileRef={id:string;etag:string};
 type Shard={document:CloudDocument;ref:FileRef};
 const isConflict=(error:unknown)=>error instanceof GraphError&&(error.status===409||error.status===412);
+/** A remote write may already have committed; never present this as a definite failure. */
+export class CloudWriteUncertainError extends Error {
+  constructor(message:string,public readonly reason:unknown){super(message);this.name='CloudWriteUncertainError';}
+}
+/** Cancelled / unapproved collision, not a transport failure. */
+export class CloudEditCancelledError extends Error {
+  constructor(message:string){super(message);this.name='CloudEditCancelledError';}
+}
+
 
 export class LiveVault {
   private key:CryptoKey|null=null;
@@ -26,7 +35,10 @@ export class LiveVault {
   private rulesRef:FileRef|null=null;
   private assetsDocument:AssetsDocument=emptyAssets();
   private assetsRef:FileRef|null=null;
-  private assetConflictResolver:((items:readonly AssetsEditCollision[])=>boolean|Promise<boolean>)|null=null;
+  private assetConflictResolver:((items:readonly AssetsEditCollision[],details?:readonly import('./assets.js').AssetsEditDetail[])=>boolean|Promise<boolean>)|null=null;
+  private statementConflictResolver:((items:readonly DocumentEditCollision[])=>boolean|Promise<boolean>)|null=null;
+  private ruleConflictResolver:((items:readonly RuleEditCollision[])=>boolean|Promise<boolean>)|null=null;
+  private mutationWarning:string|null=null;
   private hasRemote=false;
   private sessionExportable=false;
   private hasLegacy=false;
@@ -35,9 +47,27 @@ export class LiveVault {
   private pdfDrafts=new WeakMap<Uint8Array,{id:string;month:string|null;encrypted:string}>();
   constructor(private readonly client:OneDriveTestClient){}
   /** Ask the current user before overwriting any concurrent same-field asset change. */
-  setAssetConflictResolver(resolver:((items:readonly AssetsEditCollision[])=>boolean|Promise<boolean>)|null):void {
+  setAssetConflictResolver(resolver:((items:readonly AssetsEditCollision[],details?:readonly import('./assets.js').AssetsEditDetail[])=>boolean|Promise<boolean>)|null):void {
     this.assetConflictResolver=resolver;
   }
+  setStatementConflictResolver(resolver:((items:readonly DocumentEditCollision[])=>boolean|Promise<boolean>)|null):void {
+    this.statementConflictResolver=resolver;
+  }
+  setRuleConflictResolver(resolver:((items:readonly RuleEditCollision[])=>boolean|Promise<boolean>)|null):void {
+    this.ruleConflictResolver=resolver;
+  }
+  takeMutationWarning():string|null {
+    const warning=this.mutationWarning;this.mutationWarning=null;return warning;
+  }
+  private async approveCollision<T>(items:readonly T[],resolver:((items:readonly T[])=>boolean|Promise<boolean>)|null,domain:string):Promise<void> {
+    if(!items.length)return;
+    if(!resolver)throw new CloudEditCancelledError(`${domain}が別端末でも編集されています。上書きせず停止しました。最新データを取得してください。`);
+    let approved=false;
+    try{approved=await resolver(items);}
+    catch{throw new CloudEditCancelledError(`${domain}の確認画面を開けなかったため保存を停止しました。`);}
+    if(!approved)throw new CloudEditCancelledError(`${domain}の同時編集があったため保存を中止しました。OneDriveの既存内容は変更されていません。`);
+  }
+
   get unlocked():boolean{return this.key!==null;}
   get isRotating():boolean{return this.rotating;}
   get exists():boolean{return this.hasRemote;}
@@ -76,7 +106,7 @@ export class LiveVault {
     return clone(this.assetsDocument);
   }
   conflicts():number{return [...this.shards.values()].reduce((count,s)=>count+s.document.conflicts.length,0);}
-  lock():void{this.dataSetId=null;this.client.setVaultDataSet?.(null);this.key=null;this.salt='';this.sessionExportable=false;this.shards.clear();this.index=emptyIndex();this.rulesDocument=emptyRules();this.rulesRef=null;this.assetsDocument=emptyAssets();this.assetsRef=null;}
+  lock():void{this.mutationWarning=null;this.dataSetId=null;this.client.setVaultDataSet?.(null);this.key=null;this.salt='';this.sessionExportable=false;this.shards.clear();this.index=emptyIndex();this.rulesDocument=emptyRules();this.rulesRef=null;this.assetsDocument=emptyAssets();this.assetsRef=null;}
   /** Export a key only after an explicit opt-in unlock; immediately make the working key non-extractable. */
   async exportTabKey():Promise<{salt:string;key:string;dataSetId:string|null}> {
     if(!this.key||!this.sessionExportable)throw new Error('セッション保存が有効ではありません。');
@@ -492,14 +522,16 @@ export class LiveVault {
       const remote=await this.client.readMerchantRules();
       if(this.rulesRef&&!remote)throw new Error('OneDriveの利用先ルールファイルが消去されています。上書きせず停止します。');
       const remoteDoc=remote?await decryptRules(remote.text,key,this.salt):emptyRules();
-      const merged=mergeRules(base,local,remoteDoc);
+      const collisions=detectRuleEditCollisions(base,local,remoteDoc);
+      await this.approveCollision(collisions,this.ruleConflictResolver,'利用先ルール・カテゴリー');
+      const merged=mergeRules(base,local,remoteDoc,new Date().toISOString(),undefined,collisions.length>0);
       try {
         const result=await this.client.writeMerchantRules(await encryptRules(merged,key,this.salt),remote?{id:remote.id,etag:remote.etag}:null);
         if(result?.id&&result.etag){
           this.rulesDocument=merged;this.rulesRef={id:result.id,etag:result.etag};
         } else {
           const verified=await this.readMerchantRules(key,this.salt);
-          if(!verified.ref)throw new Error('利用先ルールの保存結果を確認できません。');
+          if(!verified.ref||JSON.stringify(verified.document)!==JSON.stringify(merged))throw new CloudWriteUncertainError('利用先ルールの保存結果を確認できません。再取得して照合してください。',null);
           this.rulesDocument=verified.document;this.rulesRef=verified.ref;
         }
         return;
@@ -631,11 +663,12 @@ export class LiveVault {
         const collisions=detectAssetsEditCollisions(base,local,current);
         if(collisions.length){
           if(!this.assetConflictResolver)
-            throw new Error('別の端末でも同じ資産項目が変更されています。保存を停止しました。最新データを取得して確認してください。');
-          const approved=await this.assetConflictResolver(collisions);
-          if(!approved)throw new Error('同時編集のため保存を中止しました。OneDriveの内容は変更されていません。');
+            throw new CloudEditCancelledError('別の端末でも同じ資産項目が変更されています。保存を停止しました。最新データを取得して確認してください。');
+          const details=describeAssetsEditCollisions(base,local,current,collisions);
+          const approved=await this.assetConflictResolver(collisions,details);
+          if(!approved)throw new CloudEditCancelledError('同時編集のため保存を中止しました。OneDriveの内容は変更されていません。');
         }
-        const merged=mergeAssets(base,local,current);
+        const merged=mergeAssets(base,local,current,new Date().toISOString(),collisions.length>0);
         try {
           const result=await this.client.writeAssetSettings(await encryptAssets(merged,key,this.salt),remote?{id:remote.id,etag:remote.etag}:null);
           if(result?.id&&result.etag){
@@ -702,15 +735,24 @@ export class LiveVault {
       target.deleted=target.deleted.filter(x=>x!==id);
       if(previousBucket&&previousBucket!==year)moves.push({id,from:previousBucket,to:year});
     }
-    // First put records into their destinations; only afterwards tombstone old-year copies.
-    for(const [year,updated] of changes)await this.commitYear(year,updated);
-    for(const move of moves) {
-      const old=this.working(move.from,new Map());
-      old.records=old.records.filter(r=>r.id!==move.id);
-      if(!old.deleted.includes(move.id))old.deleted.push(move.id);
-      await this.commitYear(move.from,old);
+    // Multi-year writes are not atomic. Distinguish an uncertain result from a rejected edit.
+    this.mutationWarning=null;
+    let committedYears=0;
+    try {
+      // First put records into their destinations; only afterwards tombstone old-year copies.
+      for(const [year,updated] of changes){await this.commitYear(year,updated);committedYears++;}
+      for(const move of moves) {
+        const old=this.working(move.from,new Map());
+        old.records=old.records.filter(r=>r.id!==move.id);
+        if(!old.deleted.includes(move.id))old.deleted.push(move.id);
+        await this.commitYear(move.from,old);committedYears++;
+      }
+    }catch(error){
+      if(error instanceof CloudEditCancelledError && committedYears===0)throw error;
+      throw new CloudWriteUncertainError('一部または全部の明細は保存済みの可能性があります。再保存する前に最新データを取得して確認してください。',error);
     }
-    await this.refresh();
+    try{await this.refresh();}
+    catch{this.mutationWarning='OneDriveへの保存は確認できましたが、最後の最新データ取得に失敗しました。通信回復後に取得してください。';}
     return ids;
   }
   async delete(id:string):Promise<void> {
@@ -718,13 +760,21 @@ export class LiveVault {
     await this.assertActiveGeneration();
     // Multiple copies can temporarily exist while moving billing months; remove all.
     const years=[...this.shards].filter(([,s])=>s.document.records.some(r=>r.id===id)).map(([year])=>year);
-    for(const year of years) {
-      const changed=clone(this.shards.get(year)!.document);
-      changed.records=changed.records.filter(r=>r.id!==id);
-      if(!changed.deleted.includes(id))changed.deleted.push(id);
-      await this.commitYear(year,changed);
+    this.mutationWarning=null;
+    let deletedYears=0;
+    try {
+      for(const year of years) {
+        const changed=clone(this.shards.get(year)!.document);
+        changed.records=changed.records.filter(r=>r.id!==id);
+        if(!changed.deleted.includes(id))changed.deleted.push(id);
+        await this.commitYear(year,changed);deletedYears++;
+      }
+    }catch(error){
+      if(error instanceof CloudEditCancelledError && deletedYears===0)throw error;
+      throw new CloudWriteUncertainError('明細の削除がOneDriveで完了している可能性があります。再操作せず最新データを取得してください。',error);
     }
-    await this.refresh();
+    try{await this.refresh();}
+    catch{this.mutationWarning='明細の削除は確認できましたが、最新データ取得に失敗しました。通信回復後に取得してください。';}
     // Originals are retained for recovery; audited cleanup is a separate operation.
   }
   private async registerYear(year:YearBucket):Promise<void> {
@@ -760,7 +810,9 @@ export class LiveVault {
         if(env.salt!==this.salt)throw new Error('別の暗号化保管庫が同じ年度に存在します。');
         latest=await decryptDocument(env,this.key);
       }
-      const merged=mergeDocuments(base,changed,latest);
+      const collisions=detectDocumentEditCollisions(base,changed,latest);
+      await this.approveCollision(collisions,this.statementConflictResolver,'カード明細');
+      const merged=mergeDocuments(base,changed,latest,new Date().toISOString(),undefined,collisions.length>0);
       try {
         const result=await this.client.writeYearVault(year,await encryptDocument(merged,this.key,this.salt),remote?{id:remote.id,etag:remote.etag}:null);
         if(result?.id&&result.etag) {
@@ -775,6 +827,8 @@ export class LiveVault {
           const verifiedEnvelope=parseEnvelope(saved.text);
           if(verifiedEnvelope.salt!==this.salt)throw new Error('保存直後に暗号化保管庫が変更されました。');
           const verifiedDocument=await decryptDocument(verifiedEnvelope,this.key);
+          if(JSON.stringify(verifiedDocument)!==JSON.stringify(merged))
+            throw new CloudWriteUncertainError('年別明細の保存結果が他の編集と異なります。最新データを確認してください。',null);
           this.shards.set(year,{document:verifiedDocument,ref:{id:saved.id,etag:saved.etag}});
         }
         await this.registerYear(year);

@@ -14,6 +14,13 @@ export interface MergeConflict {
   chosen: unknown;
   at: string;
 }
+/** Transient field-level details shown locally before an overlapping edit is saved. */
+export interface DocumentEditCollision {
+  recordId:string;
+  path:string;
+  local:unknown;
+  remote:unknown;
+}
 export interface CloudDocument {
   format: 'finance-cloud-document-v1';
   records: CloudRecord[];
@@ -31,7 +38,10 @@ function rows(value:unknown): value is Array<{id:string}> {
 }
 /** Three-way, row-ID-aware merge. Local (the explicitly saving editor) wins same-field ties;
  * the discarded remote value is retained in the encrypted audit log. */
-export function mergeDocuments(base:CloudDocument, local:CloudDocument, remote:CloudDocument, now = new Date().toISOString()):CloudDocument {
+export function mergeDocuments(base:CloudDocument, local:CloudDocument, remote:CloudDocument, now = new Date().toISOString(), collisionSink?:DocumentEditCollision[],preferLocalDeletes=false):CloudDocument {
+  const collided=(recordId:string,path:string,local:unknown,remote:unknown):void=>{
+    collisionSink?.push({recordId,path,local:clone(local),remote:clone(remote)});
+  };
   const conflicts:MergeConflict[] = [...remote.conflicts];
   for (const c of local.conflicts) if (!conflicts.some(other => eq(other,c))) conflicts.push(clone(c));
   const b=index(base.records), l=index(local.records), r=index(remote.records);
@@ -64,13 +74,20 @@ export function mergeDocuments(base:CloudDocument, local:CloudDocument, remote:C
     }
     // Delete versus edit: preserve the edited record/row; never silently lose information.
     if(lv===missing && rv!==missing) {
+      collided(id,path,'削除',rv);
+      if(preferLocalDeletes){
+        conflicts.push({recordId:id,path,discarded:clone(rv),chosen:'削除',at:now});
+        return missing;
+      }
       conflicts.push({recordId:id,path,discarded:'削除',chosen:clone(rv),at:now});
       return clone(rv);
     }
     if(rv===missing && lv!==missing) {
+      collided(id,path,lv,'削除');
       conflicts.push({recordId:id,path,discarded:'削除',chosen:clone(lv),at:now});
       return clone(lv);
     }
+    collided(id,path,lv===missing?'削除':lv,rv===missing?'削除':rv);
     conflicts.push({recordId:id,path,discarded:rv===missing?'削除':clone(rv),chosen:lv===missing?'削除':clone(lv),at:now});
     return lv===missing?missing:clone(lv);
   }
@@ -92,4 +109,11 @@ export function validateCloudDocument(raw:unknown):CloudDocument {
     seen.add(rec.id);
   }
   return d;
+}
+
+/** Check same statement, row ID and exact field before any OneDrive write. */
+export function detectDocumentEditCollisions(base:CloudDocument,local:CloudDocument,remote:CloudDocument):DocumentEditCollision[] {
+  const collisions:DocumentEditCollision[]=[];
+  mergeDocuments(base,local,remote,new Date().toISOString(),collisions);
+  return collisions;
 }

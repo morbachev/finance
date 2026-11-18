@@ -192,9 +192,13 @@ export function matchingRule(original:string, cardId:string|null, rules:readonly
 export function displayMerchant(original:string,cardId:string|null,rules:readonly MerchantRule[],override?:string):string {
   return override?.trim() || matchingRule(original,cardId,rules)?.displayName || original;
 }
+export interface RuleEditCollision { ruleId:string; field:string; local:unknown; remote:unknown }
 /** Three-way merge of independent rules and fields. Saving editor wins same-field ties,
  * and the other value is retained in the encrypted conflict log. Deletions use tombstones. */
-export function mergeRules(base:MerchantRulesDocument, local:MerchantRulesDocument, remote:MerchantRulesDocument, now=new Date().toISOString()):MerchantRulesDocument {
+export function mergeRules(base:MerchantRulesDocument, local:MerchantRulesDocument, remote:MerchantRulesDocument, now=new Date().toISOString(), collisionSink?:RuleEditCollision[],preferLocalDeletes=false):MerchantRulesDocument {
+  const collided=(ruleId:string,field:string,local:unknown,remote:unknown):void=>{
+    collisionSink?.push({ruleId,field,local:clone(local),remote:clone(remote)});
+  };
   const b=new Map(base.rules.map(r=>[r.id,r]));
   const l=new Map(local.rules.map(r=>[r.id,r]));
   const r=new Map(remote.rules.map(r=>[r.id,r]));
@@ -207,11 +211,17 @@ export function mergeRules(base:MerchantRulesDocument, local:MerchantRulesDocume
     if(same(lv,bv))return rv===missing?missing:clone(rv);
     if(same(rv,bv)||same(lv,rv))return lv===missing?missing:clone(lv);
     if(lv===missing && rv!==missing) {
+      collided(id,path,'削除',rv);
+      if(preferLocalDeletes){
+        conflicts.push({ruleId:id,field:path,discarded:clone(rv),chosen:'削除',at:now});return missing;
+      }
       conflicts.push({ruleId:id,field:path,discarded:'削除',chosen:clone(rv),at:now});return clone(rv);
     }
     if(rv===missing && lv!==missing) {
+      collided(id,path,lv,'削除');
       conflicts.push({ruleId:id,field:path,discarded:'削除',chosen:clone(lv),at:now});return clone(lv);
     }
+    collided(id,path,lv,rv);
     conflicts.push({ruleId:id,field:path,discarded:clone(rv),chosen:clone(lv),at:now});return clone(lv);
   };
   for(const id of new Set([...b.keys(),...r.keys(),...l.keys(),...deleted])) {
@@ -220,11 +230,17 @@ export function mergeRules(base:MerchantRulesDocument, local:MerchantRulesDocume
     // Treat an entire rule as the unit for delete-vs-edit conflicts.
     if(bv && !lv && local.deleted.includes(id)) {
       if(!rv || same(rv,bv)){deleted.add(id);continue;}
+      collided(id,'rule','削除',rv);
+      if(preferLocalDeletes){
+        conflicts.push({ruleId:id,field:'rule',discarded:clone(rv),chosen:'削除',at:now});
+        deleted.add(id);continue;
+      }
       conflicts.push({ruleId:id,field:'rule',discarded:'削除',chosen:clone(rv),at:now});
       result.push(clone(rv));deleted.delete(id);continue;
     }
     if(bv && !rv && remote.deleted.includes(id)) {
       if(!lv || same(lv,bv)){deleted.add(id);continue;}
+      collided(id,'rule',lv,'削除');
       conflicts.push({ruleId:id,field:'rule',discarded:'削除',chosen:clone(lv),at:now});
       result.push(clone(lv));deleted.delete(id);continue;
     }
@@ -262,6 +278,11 @@ export function mergeRules(base:MerchantRulesDocument, local:MerchantRulesDocume
     if(deletedL || deletedR){
       const survivor=deletedL?rDef:lDef,original=bDef;
       if(!survivor || same(survivor,original)){deletedCategories.add(id);continue;}
+      collided(`category:${id}`,'delete',deletedL?'削除':survivor,deletedR?'削除':survivor);
+      if(deletedL&&preferLocalDeletes){
+        conflicts.push({ruleId:`category:${id}`,field:'delete',discarded:clone(survivor),chosen:'削除',at:now});
+        deletedCategories.add(id);continue;
+      }
       conflicts.push({ruleId:`category:${id}`,field:'delete',discarded:'削除',chosen:clone(survivor),at:now});
       deletedCategories.delete(id);
     }
@@ -283,6 +304,7 @@ export function mergeRules(base:MerchantRulesDocument, local:MerchantRulesDocume
   const effective=new Set(listCategories({categoryColors:colors,categoryDefinitions,deletedCategories:[...deletedCategories]}).map(item=>item.id));
   for(const rule of result){
     if(rule.categoryId && !effective.has(rule.categoryId)){
+      collided(rule.id,'categoryId',null,rule.categoryId);
       conflicts.push({ruleId:rule.id,field:'categoryId',discarded:rule.categoryId,chosen:null,at:now});
       rule.categoryId=null;
     }
@@ -292,4 +314,11 @@ export function mergeRules(base:MerchantRulesDocument, local:MerchantRulesDocume
     ...(hasColors?{categoryColors:colors}:{}),
     ...(categoryDefinitions.length?{categoryDefinitions}:{}),
     ...(deletedCategories.size?{deletedCategories:[...deletedCategories]}:{})});
+}
+
+/** Same-field/category collision detector; disjoint additions and edits pass freely. */
+export function detectRuleEditCollisions(base:MerchantRulesDocument,local:MerchantRulesDocument,remote:MerchantRulesDocument):RuleEditCollision[] {
+  const collisions:RuleEditCollision[]=[];
+  mergeRules(base,local,remote,new Date().toISOString(),collisions);
+  return collisions;
 }

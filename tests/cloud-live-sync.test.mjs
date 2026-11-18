@@ -65,7 +65,9 @@ test('same-year same-field conflict retains the losing value in encrypted audit'
   await a.saveBatch([{id:'one',statement:statement()}]);await b.unlock(secret);
   const sa=a.records()[0].statement,sb=b.records()[0].statement;
   sa.statedTotal=200;sb.statedTotal=300;
-  await a.saveBatch([{id:'one',statement:sa}]);await b.saveBatch([{id:'one',statement:sb}]);
+  await a.saveBatch([{id:'one',statement:sa}]);
+  b.setStatementConflictResolver(items=>{assert.equal(items.length,1);assert.equal(items[0].path,'record.statement.statedTotal');return true;});
+  await b.saveBatch([{id:'one',statement:sb}]);
   await a.refresh();assert.equal(a.records()[0].statement.statedTotal,300);assert.equal(a.conflicts(),1);
 });
 
@@ -97,14 +99,14 @@ test('deletions persist across stale clients without resurrection',async()=>{
 test('cloud upload outage does not acknowledge an uncommitted record',async()=>{
   const [a,,mock]=drivers();await a.create(secret);
   mock.failYear='2026';
-  await assert.rejects(a.saveBatch([{id:'new',statement:statement()}]),/outage/);
+  await assert.rejects(a.saveBatch([{id:'new',statement:statement()}]),error=>error.name==='CloudWriteUncertainError'&&/outage/.test(String(error.reason)));
   assert.equal(a.records().length,0);
 });
 
 test('unregistered year file is recovered on next unlock after index outage',async()=>{
   const [a,,mock]=drivers();await a.create(secret);
   mock.failIndex=true;
-  await assert.rejects(a.saveBatch([{id:'new',statement:statement('2026-11')}]),/index outage/);
+  await assert.rejects(a.saveBatch([{id:'new',statement:statement('2026-11')}]),error=>error.name==='CloudWriteUncertainError'&&/index outage/.test(String(error.reason)));
   assert.ok(mock.file('year','2026'),'encrypted shard was saved');
   mock.failIndex=false;
   const restarted=new LiveVault(mock);
@@ -166,7 +168,7 @@ test('multi-year partial save retries with the same IDs and no duplicate records
   const [a,,mock]=drivers();await a.create(secret);
   const first=statement('2025-11'),second=statement('2026-11');
   mock.failYear='2026';
-  await assert.rejects(a.saveBatch([{statement:first},{statement:second}]),/year outage/);
+  await assert.rejects(a.saveBatch([{statement:first},{statement:second}]),error=>error.name==='CloudWriteUncertainError'&&/year outage/.test(String(error.reason)));
   assert.equal(a.records().length,1,'one year committed, no false all-success state');
   mock.failYear=null;
   const ids=await a.saveBatch([{statement:first},{statement:second}]);

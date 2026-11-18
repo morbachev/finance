@@ -23,5 +23,6 @@ test('v1.6.8 shares grid columns and gap, without touching scrolling',()=>{
 test('v1.6.8 leaves mobile rules unchanged',()=>{
   assert.match(css,/@media \(min-width: 981px\)/);
   assert.doesNotMatch(css,/@media \(max-width:/);
-  assert.match(html,/Finance v1\.6\.8/);
+  const {version}=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8'));
+  assert.ok(html.includes(`Finance v${version}`));
 });

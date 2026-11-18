@@ -4,7 +4,7 @@ import { parsePdfFile } from './importers/pdf-reader.js';
 import { planStatementImport, statementSignature } from './importers/import-policy.js';
 import { hasVault, unlockVault, readStatements, readOriginal, type LocalSource } from './storage/encrypted-vault.js';
 import { graphClient, initCloudSettings } from './cloud/cloud-settings.js';
-import { LiveVault } from './cloud/live-vault.js';
+import { LiveVault, CloudWriteUncertainError } from './cloud/live-vault.js';
 import { clearTabSession, readTabSession, saveTabSession } from './cloud/tab-session.js';
 import type { CloudRecord } from './cloud/merge.js';
 import { displayMerchant, matchingRule, sortedRules, normalizeMerchant, PALETTE, type CategoryDefinition, type MerchantRule, type MatchMode, type CategoryId, type PaletteId } from './cloud/merchant-rules.js';
@@ -299,6 +299,7 @@ async function deleteStatement(index: number): Promise<void> {
       if (!liveVault?.unlocked) throw new Error('OneDrive保管庫を解除してください。');
       await liveVault.delete(storedId);
     }
+    const mutationWarning=storedId?liveVault?.takeMutationWarning():null;
     const current = statements.indexOf(statement);
     if (current < 0) return;
     statements.splice(current, 1);
@@ -309,11 +310,12 @@ async function deleteStatement(index: number): Promise<void> {
     if (storedId && !pending().length) replaceCloudRecords(liveVault!.records());
     updateCloudStatus();
     const result = storedId ? `${name}の明細をOneDriveから削除しました。` : `${name}の未保存下書きを破棄しました。`;
-    operationResult(result);
-    toast(result);
+    operationResult(mutationWarning??result,mutationWarning?'warn':'good');
+    toast(mutationWarning??result);
   } catch (error) {
-    const result = `削除できませんでした：${error instanceof Error ? error.message : '不明なエラー'}`;
-    operationResult(result, 'bad'); toast(result);
+    const unknown=error instanceof CloudWriteUncertainError;
+    const result = `${unknown?'削除結果を確認できません':'削除できませんでした'}：${error instanceof Error ? error.message : '不明なエラー'}`;
+    operationResult(result,unknown?'warn':'bad');toast(result);
   } finally {
     batchBusy = false;
     render();
@@ -486,6 +488,30 @@ function updateCloudStatus(message?:string):void {
   bar.textContent=failure?message:liveVault?.unlocked?'':`OneDrive：${state}`;
   $('cloud-live-migrate').classList.toggle('hidden',!liveVault);
 }
+/** The values are shown only in a local browser confirmation, never transmitted. */
+const collisionLabel:Record<string,string>={
+  balance:'残高',observedAt:'残高確認日時',amount:'金額',usedOn:'利用日',merchant:'利用先',description:'補足',
+  merchantOverride:'表示名',statedTotal:'請求総額',paymentDate:'引落日',billingMonth:'請求月',
+  name:'名称',displayName:'表示名',pattern:'一致文字列',patterns:'一致候補',mode:'一致方法',
+  categoryId:'カテゴリー',color:'色',enabled:'有効・無効',status:'状態',priority:'優先順位',
+  date:'日付',delete:'削除と編集',cardDebitAccounts:'カード引落口座',
+  nisaCardRule:'NISAのカード積立',payrollDepositAccount:'給与の入金先',payrollAutoPassphrase:'給与の自動取得設定',
+  birthMonth:'生年月',mizuhoTransferPlan:'みずほ送金予測',
+};
+function collisionValue(value:unknown):string {
+  if(value===undefined||value===null||value==='')return '未設定';
+  if(typeof value==='number')return value.toLocaleString('ja-JP');
+  if(typeof value==='string')return value.slice(0,75);
+  return JSON.stringify(value).slice(0,90);
+}
+function confirmCloudConflicts(title:string,rows:readonly {label:string;field:string;local:string;remote:string}[]):boolean {
+  const details=rows.slice(0,5).map(item=>
+    `・${item.label} / ${collisionLabel[item.field]??item.field}\n  この端末：${item.local}\n  OneDrive：${item.remote}`).join('\n');
+  const suffix=rows.length>5?`\nほか${rows.length-5}項目`:'',
+    info=`${title}（${rows.length}件）\n${details}${suffix}\n\n［OK］この端末の変更を採用して保存\n［キャンセル］保存せずOneDriveの値を保持`;
+  return window.confirm(info);
+}
+
 async function startCloud():Promise<void> {
   if(cloudStartupRunning||liveVault?.unlocked)return;
   cloudStartupRunning=true;
@@ -493,16 +519,15 @@ async function startCloud():Promise<void> {
   try {
     const client=await graphClient();
     liveVault=new LiveVault(client);
-    liveVault.setAssetConflictResolver(collisions=>{
-      const labels:Record<string,string>={
-        balance:'残高',observedAt:'残高確認日時',amount:'金額',name:'名称',date:'日付',status:'入出金の状態',
-        nisaCardRule:'NISAのカード積立',payrollDepositAccount:'給与の入金先',payrollAutoPassphrase:'給与の自動取得設定',
-        birthMonth:'生年月',mizuhoTransferPlan:'みずほ送金予測',delete:'削除と編集',
-      };
-      const summary=collisions.slice(0,6).map(item=>`・${labels[item.field]??item.field}`).join('\n');
-      const extra=collisions.length>6?`\nほか${collisions.length-6}件`:'';
-      return window.confirm(`別の端末で同じ資産項目が変更されています（${collisions.length}件）。\n${summary}${extra}\n\n［OK］この端末の変更を採用して保存します。\n［キャンセル］保存を中止し、OneDrive上の変更を維持します。\n\n内容を確認してから選択してください。`);
-    });
+    liveVault.setAssetConflictResolver((collisions,details=[])=>confirmCloudConflicts('資産設定に同時編集があります',
+      collisions.map((item,i)=>({label:details[i]?.label??item.itemId,field:item.field,
+        local:details[i]?.localValue??'変更あり',remote:details[i]?.remoteValue??'別端末で変更あり'}))));
+    liveVault.setStatementConflictResolver(collisions=>confirmCloudConflicts('カード明細に同時編集があります',
+      collisions.map(item=>({label:`明細 ${item.recordId.slice(0,12)} / ${item.path.replace(/^record\.statement\./,'')}`,
+        field:item.path.split('.').at(-1)??item.path,local:collisionValue(item.local),remote:collisionValue(item.remote)}))));
+    liveVault.setRuleConflictResolver(collisions=>confirmCloudConflicts('利用先ルール・カテゴリーに同時編集があります',
+      collisions.map(item=>({label:item.ruleId.startsWith('category:')?`カテゴリー ${item.ruleId.slice(9)}`:`利用先ルール ${item.ruleId.slice(0,16)}`,
+        field:item.field,local:collisionValue(item.local),remote:collisionValue(item.remote)}))));
     assetsUi?.render();futureUi?.render();
     const exists=await liveVault.discover();
     vaultDiscoveryCompleted=true;
@@ -1133,6 +1158,7 @@ async function saveEditedStatement(s:ParsedStatement, manual=false):Promise<void
   try {
     const id=savedIds.get(s)!;
     await liveVault.saveBatch([{id,statement:structuredClone(s),source:s.sourceKind==='pdf'?pendingSources.get(s):undefined}]);
+    const mutationWarning=liveVault.takeMutationWarning();
     if(statementWorkingFingerprint(s)===fingerprint){
       savedFingerprints.set(s,fingerprint);dirty.delete(s);pendingSources.delete(s);importStaged.delete(s);
       if(s.sourceKind==='pdf')originalSaved.add(s);
@@ -1141,14 +1167,14 @@ async function saveEditedStatement(s:ParsedStatement, manual=false):Promise<void
       autoSaveTimer=setTimeout(()=>{void saveEditedStatement(s);},550);
     }
     if(!hasUnsavedChanges(s)) {
-      updateCloudStatus('変更をOneDriveに保存しました。');
-      operationResult('変更内容をOneDriveに保存しました。');
-      toast('変更内容をOneDriveに保存しました。');
+      updateCloudStatus(mutationWarning??'変更をOneDriveに保存しました。');
+      operationResult(mutationWarning??'変更内容をOneDriveに保存しました。',mutationWarning?'warn':'good');
+      toast(mutationWarning??'変更内容をOneDriveに保存しました。');
     } else operationResult('追加の変更を検出しました。続けて保存しています…', 'working');
   } catch(error){
-    updateCloudStatus(`保存失敗（未保存の変更を保持中）：${error instanceof Error?error.message:'不明なエラー'}`);
-    operationResult(`OneDriveへの変更保存に失敗しました：${error instanceof Error?error.message:'不明なエラー'}`, 'bad');
-    toast(`OneDriveへの変更保存に失敗しました：${error instanceof Error?error.message:'不明なエラー'}`);
+    const uncertain=error instanceof CloudWriteUncertainError;
+    const result=`${uncertain?'保存結果を確認できません':'保存失敗（未保存の変更を保持中）'}：${error instanceof Error?error.message:'不明なエラー'}`;
+    updateCloudStatus(result);operationResult(result,uncertain?'warn':'bad');toast(result);
   } finally{batchBusy=false;render();}
 }
 async function saveAllPending():Promise<void> {
@@ -1176,17 +1202,19 @@ async function saveAllPending():Promise<void> {
       }
     }
     if(!pending().length)replaceCloudRecords(liveVault!.records());
-    await refreshVaultControls();
+    let mutationWarning=liveVault!.takeMutationWarning();
+    try{await refreshVaultControls();}
+    catch{mutationWarning=mutationWarning??'OneDriveへの保存は完了しましたが、画面の更新に失敗しました。最新データを取得してください。';}
     const remaining = importQueue().length;
     const message = remaining
       ? `${latest.length - remaining}件をOneDriveに保存しました。残り${remaining}件は未確定です。`
       : `${latest.length}件の明細をOneDriveに暗号化保存しました。`;
-    operationResult(message, remaining ? 'warn' : 'good');
-    toast(message);
+    operationResult(mutationWarning??message,mutationWarning||remaining?'warn':'good');
+    toast(mutationWarning??message);
   }catch(error){
-    updateCloudStatus(`保存失敗：${error instanceof Error?error.message:'不明なエラー'}`);
-    operationResult(`一括保存に失敗しました：${error instanceof Error?error.message:'不明なエラー'}`, 'bad');
-    toast(`一括保存に失敗しました：${error instanceof Error?error.message:'不明なエラー'}`);
+    const uncertain=error instanceof CloudWriteUncertainError;
+    const message=`${uncertain?'一括保存結果を確認できません':'一括保存に失敗しました'}：${error instanceof Error?error.message:'不明なエラー'}`;
+    updateCloudStatus(message);operationResult(message,uncertain?'warn':'bad');toast(message);
   }finally{batchBusy=false;render();}
 }
 

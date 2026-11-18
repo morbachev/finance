@@ -69,7 +69,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
     const latestTexts = new Map();
     const histories = new Map();
     const accountDetails = new Map();
-    let cardDebitAccountsDirty = false;
+    let cardDebitAccountsDirty = false, mizuhoPlanDirty = false;
     let onceEditingId = null, onceDirty = false, onceShowAll = false;
     const editing = () => !!editingId;
     const value = (id) => $(id).value;
@@ -511,9 +511,11 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
         if (!vault?.unlocked)
             return;
         const plan = vault.assetSettings().mizuhoTransferPlan ?? DEFAULT_MIZUHO_PLAN;
-        $('mizuho-plan-enabled').checked = plan.enabled;
-        $('mizuho-plan-lead').value = String(plan.leadDays);
-        $('mizuho-plan-extra').checked = plan.extraForSmallBills;
+        if (!mizuhoPlanDirty) {
+            $('mizuho-plan-enabled').checked = plan.enabled;
+            $('mizuho-plan-lead').value = String(plan.leadDays);
+            $('mizuho-plan-extra').checked = plan.extraForSmallBills;
+        }
         const update = () => {
             const extra = $('mizuho-plan-extra').checked;
             $('mizuho-plan-example').textContent = `例：24,245円 → ${yen(estimateMizuhoTransferAmount(24245, extra))}、160,500円 → ${yen(estimateMizuhoTransferAmount(160500, extra))}（請求額から自動試算）`;
@@ -529,7 +531,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
         status(node, '保存中…');
         try {
             await requireVault().setMizuhoTransferPlan(plan);
-            cardDebitAccountsDirty = false;
+            mizuhoPlanDirty = false;
             status(node, '保存しました。');
             onSaved('みずほへの送金予測を保存しました。');
             render();
@@ -885,6 +887,8 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
     $('assets-nisa-link-form').addEventListener('submit', event => { event.preventDefault(); void updateNisaLink(); });
     $('assets-nisa-disable').addEventListener('click', () => { void updateNisaLink(true); });
     $('assets-card-debits-form').addEventListener('submit', event => { event.preventDefault(); void saveCardDebitAccounts(); });
+    $('mizuho-plan-form').addEventListener('input', () => { mizuhoPlanDirty = true; });
+    $('mizuho-plan-form').addEventListener('change', () => { mizuhoPlanDirty = true; });
     $('mizuho-plan-form').addEventListener('submit', event => { event.preventDefault(); void saveMizuhoPlan(); });
     $('mizuho-plan-extra').addEventListener('change', () => { $('mizuho-plan-example').textContent = `例：24,245円 → ${yen(estimateMizuhoTransferAmount(24245, $('mizuho-plan-extra').checked))}、160,500円 → ${yen(estimateMizuhoTransferAmount(160500, $('mizuho-plan-extra').checked))}`; });
     $('assets-payroll-connect').addEventListener('submit', event => { event.preventDefault(); void syncPayroll(); });
@@ -952,6 +956,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             nisaDirty = false;
             payrollAccountDirty = false;
             cardDebitAccountsDirty = false;
+            mizuhoPlanDirty = false;
             payrollSession = null;
             payrollIncome = [];
             payrollSynced = false;
@@ -970,6 +975,6 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             status($('assets-once-status'), '');
             render();
             onPayrollChange();
-        }, isBusy: () => busy || payrollBusy, isDirty: () => onceDirty || dirty || nisaDirty || payrollAccountDirty || editing() || [...amounts.values()].some(input => input.value.trim() !== '') ||
+        }, isBusy: () => busy || payrollBusy, isDirty: () => onceDirty || dirty || nisaDirty || payrollAccountDirty || cardDebitAccountsDirty || mizuhoPlanDirty || editing() || [...amounts.values()].some(input => input.value.trim() !== '') ||
             value('assets-recurring-name').trim() !== '' || value('assets-recurring-amount').trim() !== '' };
 }

@@ -68,7 +68,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
   const latestTexts=new Map<AssetAccountId,HTMLElement>();
   const histories=new Map<AssetAccountId,HTMLElement>();
   const accountDetails=new Map<AssetAccountId,HTMLElement>();
-  let cardDebitAccountsDirty=false;
+  let cardDebitAccountsDirty=false,mizuhoPlanDirty=false;
   let onceEditingId:string|null=null,onceDirty=false,onceShowAll=false;
   const editing=()=>!!editingId;
   const value=(id:string)=>$<HTMLInputElement|HTMLSelectElement>(id).value;
@@ -396,9 +396,11 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
   function renderMizuhoPlan():void {
     const vault=getVault();if(!vault?.unlocked)return;
     const plan=vault.assetSettings().mizuhoTransferPlan??DEFAULT_MIZUHO_PLAN;
-    $<HTMLInputElement>('mizuho-plan-enabled').checked=plan.enabled;
-    $<HTMLInputElement>('mizuho-plan-lead').value=String(plan.leadDays);
-    $<HTMLInputElement>('mizuho-plan-extra').checked=plan.extraForSmallBills;
+    if(!mizuhoPlanDirty){
+      $<HTMLInputElement>('mizuho-plan-enabled').checked=plan.enabled;
+      $<HTMLInputElement>('mizuho-plan-lead').value=String(plan.leadDays);
+      $<HTMLInputElement>('mizuho-plan-extra').checked=plan.extraForSmallBills;
+    }
     const update=()=>{
       const extra=$<HTMLInputElement>('mizuho-plan-extra').checked;
       $('mizuho-plan-example').textContent=`例：24,245円 → ${yen(estimateMizuhoTransferAmount(24245,extra))}、160,500円 → ${yen(estimateMizuhoTransferAmount(160500,extra))}（請求額から自動試算）`;
@@ -411,7 +413,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     const node=$('mizuho-plan-status');toggleBusy(true);status(node,'保存中…');
     try{
       await requireVault().setMizuhoTransferPlan(plan);
-      cardDebitAccountsDirty=false;
+      mizuhoPlanDirty=false;
       status(node,'保存しました。');onSaved('みずほへの送金予測を保存しました。');render();
     }catch(err){status(node,`保存失敗：${err instanceof Error?err.message:'入力を確認してください。'}`,true);}
     finally{toggleBusy(false);}
@@ -641,6 +643,8 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
   $<HTMLFormElement>('assets-nisa-link-form').addEventListener('submit',event=>{event.preventDefault();void updateNisaLink();});
   $('assets-nisa-disable').addEventListener('click',()=>{void updateNisaLink(true);});
   $('assets-card-debits-form').addEventListener('submit',event=>{event.preventDefault();void saveCardDebitAccounts();});
+  $('mizuho-plan-form').addEventListener('input',()=>{mizuhoPlanDirty=true;});
+  $('mizuho-plan-form').addEventListener('change',()=>{mizuhoPlanDirty=true;});
   $('mizuho-plan-form').addEventListener('submit',event=>{event.preventDefault();void saveMizuhoPlan();});
   $('mizuho-plan-extra').addEventListener('change',()=>{$('mizuho-plan-example').textContent=`例：24,245円 → ${yen(estimateMizuhoTransferAmount(24245,$<HTMLInputElement>('mizuho-plan-extra').checked))}、160,500円 → ${yen(estimateMizuhoTransferAmount(160500,$<HTMLInputElement>('mizuho-plan-extra').checked))}`;});
   $<HTMLFormElement>('assets-payroll-connect').addEventListener('submit',event=>{event.preventDefault();void syncPayroll();});
@@ -688,7 +692,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     const ready=!!getVault()?.unlocked&&payrollSynced&&payrollOwner===getVault();
     return ready?{ready:true,syncedAt:payrollSyncedAt,entries:structuredClone(payrollIncome)}:{ready:false,syncedAt:null,entries:[]};
   },reset:()=>{
-    resetForm();resetOnceForm();onceShowAll=false;nisaDirty=false;payrollAccountDirty=false;cardDebitAccountsDirty=false;
+    resetForm();resetOnceForm();onceShowAll=false;nisaDirty=false;payrollAccountDirty=false;cardDebitAccountsDirty=false;mizuhoPlanDirty=false;
     payrollSession=null;payrollIncome=[];payrollSynced=false;payrollSyncedAt=0;lastPayrollAttemptAt=0;payrollOwner=null;
     $<HTMLInputElement>('assets-payroll-secret').value='';
     $('assets-payroll-count').textContent='';
@@ -698,6 +702,6 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     for(const account of ASSET_ACCOUNTS)amounts.get(account.id)!.value='';
     status($('assets-balances-status'),'');
     status($('assets-recurring-status'),'');status($('assets-once-status'),'');render();onPayrollChange();
-  },isBusy:()=>busy||payrollBusy,isDirty:()=>onceDirty||dirty||nisaDirty||payrollAccountDirty||editing()||[...amounts.values()].some(input=>input.value.trim()!=='')||
+  },isBusy:()=>busy||payrollBusy,isDirty:()=>onceDirty||dirty||nisaDirty||payrollAccountDirty||cardDebitAccountsDirty||mizuhoPlanDirty||editing()||[...amounts.values()].some(input=>input.value.trim()!=='')||
     value('assets-recurring-name').trim()!==''||value('assets-recurring-amount').trim()!==''};
 }

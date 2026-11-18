@@ -1,0 +1,11 @@
+/* Independent startup failure controls remain reachable if the app module fails. */
+#startup-recovery{position:fixed;z-index:9999;bottom:18px;right:18px;width:min(470px,calc(100vw - 36px));box-sizing:border-box;
+  padding:18px 20px;border:1px solid #f0ba67;border-radius:14px;background:#fff9ed;color:#352912;box-shadow:0 12px 45px #0004;font:14px/1.6 system-ui,-apple-system,sans-serif}
+#startup-recovery strong{display:block;font-size:16px;margin-bottom:6px}
+#startup-recovery p{margin:0 0 12px}
+.startup-recovery-actions{display:flex;flex-wrap:wrap;gap:8px}
+.startup-recovery-actions button{border:1px solid #b68b52;border-radius:7px;background:#fff;color:#352912;padding:7px 10px;cursor:pointer;font:inherit}
+.startup-recovery-actions button:focus-visible{outline:3px solid #8f5e24;outline-offset:2px}
+@media(max-width:800px){#startup-recovery{bottom:10px;right:10px;width:calc(100vw - 20px);padding:13px 15px}}
+
+.startup-recovery-note:empty{display:none}

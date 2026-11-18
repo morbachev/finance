@@ -1,4 +1,5 @@
 import { ASSET_ACCOUNTS, latestBalance, validateRecurring, validateSnapshot, validateNisaCardRule, validateOneTime } from '../cloud/assets.js';
+import { CloudWriteUncertainError } from '../cloud/live-vault.js';
 import { CARDS } from '../models/types.js';
 import { lastDayOfNextMonth, localDay, matchingNisaRows } from '../cloud/asset-projection.js';
 import { forecastBankBalances } from '../cloud/salary-projection.js';
@@ -41,6 +42,13 @@ function status(node, message, error = false) {
             node.textContent = ''; assetStatusTimers.delete(node); }, 5000);
         assetStatusTimers.set(node, timer);
     }
+}
+/** An ambiguous Graph write must never be described as a definite save failure. */
+function mutationError(error, action = '保存') {
+    const message = error instanceof Error ? error.message : '通信エラー';
+    return error instanceof CloudWriteUncertainError
+        ? `${action}結果未確認：${message}`
+        : `${action}失敗：${message}`;
 }
 function addButton(label, handler, remove = false) {
     const button = document.createElement('button');
@@ -192,7 +200,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             render();
         }
         catch (error) {
-            status(node, `保存できませんでした：${error instanceof Error ? error.message : '不明なエラー'}`, true);
+            status(node, mutationError(error), true);
         }
         finally {
             toggleBusy(false);
@@ -211,7 +219,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             render();
         }
         catch (error) {
-            status(node, `削除失敗：${error instanceof Error ? error.message : '不明なエラー'}`, true);
+            status(node, mutationError(error, '削除'), true);
         }
         finally {
             toggleBusy(false);
@@ -352,7 +360,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             onPayrollChange();
         }
         catch (error) {
-            status(node, `保存できませんでした：${error instanceof Error ? error.message : '通信エラー'}`, true);
+            status(node, mutationError(error), true);
         }
         finally {
             toggleBusy(false);
@@ -370,7 +378,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             onPayrollChange();
         }
         catch (error) {
-            status($('assets-once-status'), `削除できませんでした：${error instanceof Error ? error.message : '通信エラー'}`, true);
+            status($('assets-once-status'), mutationError(error, '削除'), true);
         }
         finally {
             toggleBusy(false);
@@ -500,7 +508,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             render();
         }
         catch (err) {
-            status(node, `保存失敗：${err instanceof Error ? err.message : '通信エラー'}`, true);
+            status(node, mutationError(err), true);
         }
         finally {
             toggleBusy(false);
@@ -537,7 +545,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             render();
         }
         catch (err) {
-            status(node, `保存失敗：${err instanceof Error ? err.message : '入力を確認してください。'}`, true);
+            status(node, mutationError(err), true);
         }
         finally {
             toggleBusy(false);
@@ -575,7 +583,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             render();
         }
         catch (error) {
-            status(node, `保存できませんでした：${error instanceof Error ? error.message : '不明なエラー'}`, true);
+            status(node, mutationError(error), true);
         }
         finally {
             toggleBusy(false);
@@ -630,7 +638,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             render();
         }
         catch (error) {
-            status(node, `削除失敗：${error instanceof Error ? error.message : '不明なエラー'}`, true);
+            status(node, mutationError(error, '削除'), true);
         }
         finally {
             toggleBusy(false);
@@ -773,7 +781,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             onPayrollChange();
         }
         catch (error) {
-            status($('assets-payroll-status'), `連携解除の保存に失敗しました：${error instanceof Error ? error.message : '通信エラー'}`, true);
+            status($('assets-payroll-status'), mutationError(error, '解除'), true);
         }
         finally {
             payrollBusy = false;
@@ -801,7 +809,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             render();
         }
         catch (error) {
-            status(node, `保存失敗：${error instanceof Error ? error.message : '通信エラー'}`, true);
+            status(node, mutationError(error), true);
         }
         finally {
             toggleBusy(false);
@@ -922,7 +930,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
                 render();
             }
             catch (error) {
-                status(node, `保存できませんでした：${error instanceof Error ? error.message : '不明なエラー'}`, true);
+                status(node, mutationError(error), true);
             }
             finally {
                 toggleBusy(false);

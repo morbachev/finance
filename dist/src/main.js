@@ -3,7 +3,7 @@ import { parseStatementText } from './importers/statement-parser.js';
 import { parsePdfFile } from './importers/pdf-reader.js';
 import { planStatementImport, statementSignature } from './importers/import-policy.js';
 import { hasVault, unlockVault, readStatements, readOriginal } from './storage/encrypted-vault.js';
-import { graphClient, initCloudSettings } from './cloud/cloud-settings.js';
+import { graphClientWithoutRedirect, initCloudSettings } from './cloud/cloud-settings.js';
 import { LiveVault, CloudWriteUncertainError } from './cloud/live-vault.js';
 import { clearTabSession, readTabSession, saveTabSession } from './cloud/tab-session.js';
 import { displayMerchant, matchingRule, sortedRules, normalizeMerchant, PALETTE } from './cloud/merchant-rules.js';
@@ -565,7 +565,7 @@ function updateCloudStatus(message) {
     const state = !liveVault ? '未接続' : liveVault.unlocked ? '接続済み' : !vaultDiscoveryCompleted ? '確認中' : liveVault.exists ? 'ロック中' : '保管庫なし';
     // New vault creation is an explicit action, never a side effect of refresh.
     $('cloud-new-vault').classList.toggle('hidden', !liveVault || !vaultDiscoveryCompleted || liveVault.exists || liveVault.unlocked);
-    label.textContent = `OneDrive：${state}`;
+    label.textContent = state;
     // Keep the global bar quiet when connected. Only missing access or an error needs attention.
     const failure = message && /失敗|エラー|不備|接続してください|未保存|更新確認/.test(message);
     bar.textContent = failure ? message : liveVault?.unlocked ? '' : `OneDrive：${state}`;
@@ -600,8 +600,16 @@ async function startCloud() {
         return;
     cloudStartupRunning = true;
     vaultDiscoveryCompleted = false;
+    // Connecting is a background task. It must not block navigation or silently redirect.
+    $('cloud-live-status').textContent = '接続中';
+    $('cloud-live-bar').textContent = 'OneDriveに接続中…';
+    const slowNotice = setTimeout(() => {
+        if (!cloudStartupRunning)
+            return;
+        $('cloud-live-bar').textContent = 'OneDriveの接続に時間がかかっています';
+    }, 12000);
     try {
-        const client = await graphClient();
+        const client = await graphClientWithoutRedirect();
         liveVault = new LiveVault(client);
         liveVault.setAssetConflictResolver((collisions, details = []) => confirmCloudConflicts('資産設定に同時編集があります', collisions.map((item, i) => ({ label: details[i]?.label ?? item.itemId, field: item.field,
             local: details[i]?.localValue ?? '変更あり', remote: details[i]?.remoteValue ?? '別端末で変更あり' }))));
@@ -650,6 +658,7 @@ async function startCloud() {
         updateCloudStatus(`OneDriveに接続してください：${error instanceof Error ? error.message : '接続エラー'}`);
     }
     finally {
+        clearTimeout(slowNotice);
         cloudStartupRunning = false;
     }
 }
@@ -1220,9 +1229,10 @@ async function saveCategoryDialog() {
     }
     catch (error) {
         const status = $('rules-category-status');
-        status.textContent = `保存失敗：${error instanceof Error ? error.message : '通信エラー'}。編集内容は残っています。`;
+        const unknown = error instanceof CloudWriteUncertainError;
+        status.textContent = `${unknown ? '保存結果未確認' : '保存失敗'}：${error instanceof Error ? error.message : '通信エラー'}。編集内容は残っています。`;
         status.classList.add('bad');
-        operationResult('カテゴリーの一括保存に失敗しました。編集内容は保持しています。', 'bad');
+        operationResult(unknown ? 'カテゴリーが保存済みの可能性があります。最新データを取得して確認してください。' : 'カテゴリーの一括保存に失敗しました。編集内容は保持しています。', unknown ? 'warn' : 'bad');
     }
     finally {
         rulesBusy = false;
@@ -1292,8 +1302,9 @@ async function saveRule(rule) {
     }
     catch (error) {
         $('rules-sync-status').className = 'rules-sync-status bad';
-        $('rules-sync-status').textContent = `利用先ルールの保存失敗：${error instanceof Error ? error.message : '不明なエラー'}`;
-        operationResult('利用先ルールを保存できませんでした。内容を保持しています。', 'bad');
+        const unknown = error instanceof CloudWriteUncertainError;
+        $('rules-sync-status').textContent = `利用先ルールの${unknown ? '保存結果未確認' : '保存失敗'}：${error instanceof Error ? error.message : '不明なエラー'}`;
+        operationResult(unknown ? '利用先ルールが保存済みの可能性があります。最新データを取得して確認してください。' : '利用先ルールを保存できませんでした。内容を保持しています。', unknown ? 'warn' : 'bad');
     }
     finally {
         rulesBusy = false;
@@ -1318,8 +1329,9 @@ async function deleteRule(rule) {
     }
     catch (error) {
         $('rules-sync-status').className = 'rules-sync-status bad';
-        $('rules-sync-status').textContent = `削除失敗：${error instanceof Error ? error.message : '不明なエラー'}`;
-        operationResult('利用先ルールを削除できませんでした。', 'bad');
+        const unknown = error instanceof CloudWriteUncertainError;
+        $('rules-sync-status').textContent = `${unknown ? '削除結果未確認' : '削除失敗'}：${error instanceof Error ? error.message : '不明なエラー'}`;
+        operationResult(unknown ? 'ルールの削除が完了している可能性があります。最新データを取得して確認してください。' : '利用先ルールを削除できませんでした。', unknown ? 'warn' : 'bad');
     }
     finally {
         rulesBusy = false;
@@ -1670,6 +1682,15 @@ function initTheme() {
     });
 }
 function init() {
+    // Register navigation before complex initializers. A failure later must not
+    // prevent opening Settings to investigate the startup problem.
+    $('nav-import').addEventListener('click', () => showView('import'));
+    $('nav-manage').addEventListener('click', () => { manageReturnToSummary = false; showView('manage'); });
+    $('nav-summary').addEventListener('click', () => showView('summary'));
+    $('nav-rules').addEventListener('click', () => showView('rules'));
+    $('nav-assets').addEventListener('click', () => showView('assets'));
+    $('nav-future').addEventListener('click', () => showView('future'));
+    $('nav-settings').addEventListener('click', () => showView('settings'));
     initPasswordFields();
     initTheme();
     const mobileToggle = document.getElementById('mobile-nav-toggle');
@@ -1789,8 +1810,6 @@ function init() {
             renderRows();
         });
     }
-    $('nav-import').addEventListener('click', () => showView('import'));
-    $('nav-manage').addEventListener('click', () => { manageReturnToSummary = false; showView('manage'); });
     $('manage-back-summary').addEventListener('click', () => {
         showView('summary');
         const content = document.querySelector('.workspace .content');
@@ -1799,11 +1818,6 @@ function init() {
         window.scrollTo(0, summaryReturnPageY);
     });
     $('manage-original-download').addEventListener('click', () => { void downloadManagedOriginal(); });
-    $('nav-summary').addEventListener('click', () => showView('summary'));
-    $('nav-rules').addEventListener('click', () => showView('rules'));
-    $('nav-assets').addEventListener('click', () => showView('assets'));
-    $('nav-future').addEventListener('click', () => showView('future'));
-    $('nav-settings').addEventListener('click', () => showView('settings'));
     for (const [key, id] of [['usedOn', 'manage-sort-date'], ['amount', 'manage-sort-amount']]) {
         $(id).addEventListener('click', () => {
             manageSort = { key, direction: manageSort?.key === key && manageSort.direction === 'asc' ? 'desc' : 'asc' };
@@ -2045,6 +2059,7 @@ function init() {
         showView(lastView);
     void refreshVaultControls();
     render();
+    document.documentElement.dataset.financeReady = 'true';
     void startCloud();
     window.addEventListener('focus', () => { if (liveVault?.unlocked && !liveVault.isRotating && !pending().length && !batchBusy)
         void refreshCloud().catch(error => updateCloudStatus(`更新確認失敗：${error instanceof Error ? error.message : '通信エラー'}`)); });

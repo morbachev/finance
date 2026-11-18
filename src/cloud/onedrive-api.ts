@@ -42,8 +42,21 @@ export class OneDriveTestClient {
     private readonly token: string,
     private readonly http: typeof fetch = (input, init) => globalThis.fetch(input, init),
   ) {}
+  /** GET-only deadline: an unreachable OneDrive must not leave the UI waiting forever.
+   * Do not abort writes automatically: their server-side result may be uncertain. */
+  private async httpWithReadTimeout(url:string, init:RequestInit):Promise<Response> {
+    if((init.method??'GET').toUpperCase()!=='GET')return this.http(url,init);
+    const controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),30000);
+    try {
+      return await this.http(url,{...init,signal:controller.signal});
+    }catch(error) {
+      if(controller.signal.aborted)throw new Error('OneDriveの読み取りが30秒以内に完了しませんでした。通信環境とMicrosoft認証を確認してください。');
+      throw error;
+    }finally{clearTimeout(timeout);}
+  }
   private async graph(path: string, init: RequestInit = {}, allowNotModified = false): Promise<Response> {
-    const response = await this.http(GRAPH + path, {
+    const response = await this.httpWithReadTimeout(GRAPH + path, {
       ...init,
       headers: { Authorization: `Bearer ${this.token}`, ...init.headers },
       redirect: 'error',
@@ -71,7 +84,7 @@ export class OneDriveTestClient {
     const url = item['@microsoft.graph.downloadUrl'];
     if (!url || new URL(url).protocol !== 'https:') throw new Error('安全なダウンロードURLを取得できませんでした。');
     // A short-lived preauthenticated download URL MUST NOT receive the Graph bearer token.
-    const result = await this.http(url, { method:'GET', credentials:'omit' });
+    const result = await this.httpWithReadTimeout(url, { method:'GET', credentials:'omit' });
     if (!result.ok) throw new Error(`OneDriveからの取得に失敗しました (HTTP ${result.status})。`);
     if (Number(result.headers.get('Content-Length') ?? 0) > maxBytes) throw new Error('ダウンロードがサイズ上限を超えています。');
     // Stream when possible to bound memory before materializing a string.

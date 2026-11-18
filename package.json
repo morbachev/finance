@@ -1,6 +1,6 @@
 {
   "name": "finance-importer-starter",
-  "version": "1.6.10",
+  "version": "1.6.13",
   "private": true,
   "type": "module",
   "scripts": {

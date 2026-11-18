@@ -48,8 +48,27 @@ export class OneDriveTestClient {
         this.token = token;
         this.http = http;
     }
+    /** GET-only deadline: an unreachable OneDrive must not leave the UI waiting forever.
+     * Do not abort writes automatically: their server-side result may be uncertain. */
+    async httpWithReadTimeout(url, init) {
+        if ((init.method ?? 'GET').toUpperCase() !== 'GET')
+            return this.http(url, init);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+        try {
+            return await this.http(url, { ...init, signal: controller.signal });
+        }
+        catch (error) {
+            if (controller.signal.aborted)
+                throw new Error('OneDriveの読み取りが30秒以内に完了しませんでした。通信環境とMicrosoft認証を確認してください。');
+            throw error;
+        }
+        finally {
+            clearTimeout(timeout);
+        }
+    }
     async graph(path, init = {}, allowNotModified = false) {
-        const response = await this.http(GRAPH + path, {
+        const response = await this.httpWithReadTimeout(GRAPH + path, {
             ...init,
             headers: { Authorization: `Bearer ${this.token}`, ...init.headers },
             redirect: 'error',
@@ -81,7 +100,7 @@ export class OneDriveTestClient {
         if (!url || new URL(url).protocol !== 'https:')
             throw new Error('安全なダウンロードURLを取得できませんでした。');
         // A short-lived preauthenticated download URL MUST NOT receive the Graph bearer token.
-        const result = await this.http(url, { method: 'GET', credentials: 'omit' });
+        const result = await this.httpWithReadTimeout(url, { method: 'GET', credentials: 'omit' });
         if (!result.ok)
             throw new Error(`OneDriveからの取得に失敗しました (HTTP ${result.status})。`);
         if (Number(result.headers.get('Content-Length') ?? 0) > maxBytes)

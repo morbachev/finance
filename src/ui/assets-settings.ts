@@ -1,6 +1,6 @@
 import { ASSET_ACCOUNTS, latestBalance, validateRecurring, validateSnapshot, validateNisaCardRule, validateOneTime,
   type AssetAccountId, type RecurringEntry, type RecurringKind, type RecurringFrequency, type OneTimeEntry, type OneTimeKind, type OneTimeStatus } from '../cloud/assets.js';
-import type { LiveVault } from '../cloud/live-vault.js';
+import { CloudWriteUncertainError, type LiveVault } from '../cloud/live-vault.js';
 import type { CategoryDefinition } from '../cloud/merchant-rules.js';
 import { CARDS } from '../models/types.js';
 import { lastDayOfNextMonth, localDay, matchingNisaRows } from '../cloud/asset-projection.js';
@@ -36,6 +36,13 @@ function status(node:HTMLElement,message:string,error=false):void {
     const timer=setTimeout(()=>{if(node.textContent===message)node.textContent='';assetStatusTimers.delete(node);},5000);
     assetStatusTimers.set(node,timer);
   }
+}
+/** An ambiguous Graph write must never be described as a definite save failure. */
+function mutationError(error:unknown,action:'保存'|'削除'|'解除'='保存'):string {
+  const message=error instanceof Error?error.message:'通信エラー';
+  return error instanceof CloudWriteUncertainError
+    ? `${action}結果未確認：${message}`
+    : `${action}失敗：${message}`;
 }
 function addButton(label:string,handler:()=>void,remove=false):HTMLButtonElement {
   const button=document.createElement('button');button.type='button';button.textContent=label;
@@ -176,7 +183,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
       status(node,`${pending.length}口座の残高を保存しました。`);
       onSaved(`${pending.length}口座の残高を保存しました。`);
       render();
-    }catch(error){status(node,`保存できませんでした：${error instanceof Error?error.message:'不明なエラー'}`,true);}
+    }catch(error){status(node,mutationError(error),true);}
     finally{toggleBusy(false);}
   }
   async function deleteSnapshot(id:string,accountId:AssetAccountId):Promise<void> {
@@ -184,7 +191,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     const node=$('assets-balances-status');
     toggleBusy(true);status(node,`${accountName(accountId)}の残高記録を削除しています…`);
     try{await requireVault().deleteBalanceSnapshot(id);status(node,`${accountName(accountId)}の残高記録を削除しました。`);onSaved('残高記録をOneDriveから削除しました。');render();}
-    catch(error){status(node,`削除失敗：${error instanceof Error?error.message:'不明なエラー'}`,true);}
+    catch(error){status(node,mutationError(error,'削除'),true);}
     finally{toggleBusy(false);}
   }
   const onceKinds:Record<OneTimeKind,string>={expense:'支出',income:'入金',transfer:'振替',withdrawal:'現金引出'};
@@ -299,14 +306,14 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
       onceDirty=false;onceDialog.close();resetOnceForm();
       status($('assets-once-status'),'入出金を保存しました。');onSaved('入出金をOneDriveに保存しました。');
       render();onPayrollChange();
-    }catch(error){status(node,`保存できませんでした：${error instanceof Error?error.message:'通信エラー'}`,true);}
+    }catch(error){status(node,mutationError(error),true);}
     finally{toggleBusy(false);}
   }
   async function deleteOnce(id:string):Promise<void> {
     if(busy||!window.confirm('この入出金記録を削除しますか？'))return;
     toggleBusy(true);
     try {await requireVault().deleteOneTime(id);status($('assets-once-status'),'入出金を削除しました。');onSaved('入出金記録を削除しました。');render();onPayrollChange();}
-    catch(error){status($('assets-once-status'),`削除できませんでした：${error instanceof Error?error.message:'通信エラー'}`,true);}
+    catch(error){status($('assets-once-status'),mutationError(error,'削除'),true);}
     finally{toggleBusy(false);}
   }
   function renderAccounts():void {
@@ -390,7 +397,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     }
     const node=$('assets-card-debits-status');toggleBusy(true);status(node,'保存中…');
     try{await requireVault().setCardDebitAccounts(values);cardDebitAccountsDirty=false;status(node,'保存しました。');onSaved('カードの引落口座を保存しました。');render();}
-    catch(err){status(node,`保存失敗：${err instanceof Error?err.message:'通信エラー'}`,true);}
+    catch(err){status(node,mutationError(err),true);}
     finally{toggleBusy(false);}
   }
   function renderMizuhoPlan():void {
@@ -415,7 +422,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
       await requireVault().setMizuhoTransferPlan(plan);
       mizuhoPlanDirty=false;
       status(node,'保存しました。');onSaved('みずほへの送金予測を保存しました。');render();
-    }catch(err){status(node,`保存失敗：${err instanceof Error?err.message:'入力を確認してください。'}`,true);}
+    }catch(err){status(node,mutationError(err),true);}
     finally{toggleBusy(false);}
   }
   function renderNisaLink():void {
@@ -441,7 +448,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
       await requireVault().setNisaCardRule(link);
       nisaDirty=false;status(node,clear?'NISAのカード連携を解除しました。':'NISAのカード連携を保存しました。');
       onSaved(clear?'NISAカード連携を解除しました。':'NISAカード連携を保存しました。');render();
-    }catch(error){status(node,`保存できませんでした：${error instanceof Error?error.message:'不明なエラー'}`,true);}
+    }catch(error){status(node,mutationError(error),true);}
     finally{toggleBusy(false);}
   }
   function renderRecurring():void {
@@ -473,7 +480,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     if(busy||!window.confirm(`「${item.name}」を削除しますか？`))return;
     const node=$('assets-recurring-status');toggleBusy(true);status(node,'OneDriveから削除しています…');
     try{await requireVault().deleteRecurring(item.id);if(editingId===item.id)resetForm();status(node,'削除しました。');onSaved('定期入出金をOneDriveから削除しました。');render();}
-    catch(error){status(node,`削除失敗：${error instanceof Error?error.message:'不明なエラー'}`,true);}
+    catch(error){status(node,mutationError(error,'削除'),true);}
     finally{toggleBusy(false);}
   }
   function renderPayroll():void {
@@ -571,7 +578,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
       status($('assets-payroll-status'),'自動連携を解除し、Financeの暗号化設定から連携パスフレーズを削除しました。');
       renderAccounts();renderPayroll();onPayrollChange();
     }catch(error){
-      status($('assets-payroll-status'),`連携解除の保存に失敗しました：${error instanceof Error?error.message:'通信エラー'}`,true);
+      status($('assets-payroll-status'),mutationError(error,'解除'),true);
     }finally{payrollBusy=false;$<HTMLButtonElement>('assets-payroll-forget').disabled=false;}
   }
   async function savePayrollDeposit():Promise<void> {
@@ -585,7 +592,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
       await requireVault().setPayrollDepositAccount(id===''?null:id as 'rakuten-bank'|'cash-savings');
       payrollAccountDirty=false;status(node,'給与の入金先を暗号化して保存しました。');
       onSaved('給与の入金先を保存しました。');render();
-    }catch(error){status(node,`保存失敗：${error instanceof Error?error.message:'通信エラー'}`,true);}
+    }catch(error){status(node,mutationError(error),true);}
     finally{toggleBusy(false);}
   }
   function render():void {
@@ -671,7 +678,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
         await requireVault().upsertRecurring(entry);
         resetForm();status(node,'OneDriveへの保存が完了しました。');
         onSaved('定期入出金をOneDriveに保存しました。');render();
-      }catch(error){status(node,`保存できませんでした：${error instanceof Error?error.message:'不明なエラー'}`,true);}
+      }catch(error){status(node,mutationError(error),true);}
       finally{toggleBusy(false);}
     })();
   });

@@ -88,7 +88,7 @@ export async function graphClient():Promise<OneDriveTestClient> {
   }
 }
 /** This explicit check never opens a login screen or changes the account. */
-async function graphClientWithoutRedirect():Promise<OneDriveTestClient> {
+export async function graphClientWithoutRedirect():Promise<OneDriveTestClient> {
   const instance=await ensureMsal();
   const current=account();
   if(!current)throw new Error('Microsoftアカウントが未接続です。上の「接続」からログインしてください。');
@@ -230,8 +230,10 @@ export function initCloudSettings(handlers:CloudHandlers):void {
   $('cloud-live-migrate').addEventListener('click',()=>{void action(handlers.onMigration);});
   $('cloud-live-lock').addEventListener('click',()=>{if(!busy)handlers.onLock();});
   updateUi();
-  if(id&&validId(id))void action(async()=>{
-    await ensureMsal();
+  // Passive startup must not set the global 'busy' flag, otherwise a stalled
+  // MSAL initialization disables reconnect/diagnostics in Settings indefinitely.
+  if(id&&validId(id))void ensureMsal().then(()=>updateUi()).catch(error=>{
+    status(`認証ライブラリの初期化に失敗しました：${error instanceof Error?error.message:'不明なエラー'}`,'error');
     updateUi();
   });
 }

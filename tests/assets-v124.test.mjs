@@ -126,7 +126,8 @@ test('failed Graph saves never mark in-memory settings as saved',async()=>{
   await assert.rejects(a.addBalanceSnapshot(snap()),/outage/);
   assert.equal(a.assetSettings().snapshots.length,0);
   assert.equal(store.has('assets'),false);
-  graph.failSave=false;await a.addBalanceSnapshot(snap());
+  // A timeout-like upload failure could have committed remotely; reconcile before retrying.
+  graph.failSave=false;await a.refresh();await a.addBalanceSnapshot(snap());
   graph.failSave=true;
   await assert.rejects(a.deleteBalanceSnapshot('snapshot-1'),/outage/);
   assert.equal(a.assetSettings().snapshots.length,1);
@@ -149,6 +150,7 @@ test('one save action commits multiple account snapshots together in one cloud w
   await assert.rejects(vault.addBalanceSnapshots([snap('network-failure','nisa',42000)]),/outage/);
   assert.equal(vault.assetSettings().snapshots.length,2,'failed save does not mutate visible balances');
   graph.failSave=false;
+  await vault.refresh(); // Ambiguous writes block resubmission until remote state is re-read.
   await vault.addBalanceSnapshot(snap('single-compatible','nisa',42000));
   assert.equal(writes,3,'existing single-snapshot API still works');
   assert.equal(vault.assetSettings().snapshots.length,3);

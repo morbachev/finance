@@ -14,6 +14,9 @@ const clone=<T>(value:T):T=>structuredClone(value);
 type FileRef={id:string;etag:string};
 type Shard={document:CloudDocument;ref:FileRef};
 const isConflict=(error:unknown)=>error instanceof GraphError&&(error.status===409||error.status===412);
+// 409/412 are known rejected writes. Other transport errors can occur *after* Graph committed a write.
+const isDefiniteWriteRejection=(error:unknown)=>error instanceof GraphError
+  &&error.status>=400&&error.status<500&&error.status!==408&&error.status!==429;
 /** A remote write may already have committed; never present this as a definite failure. */
 export class CloudWriteUncertainError extends Error {
   constructor(message:string,public readonly reason:unknown){super(message);this.name='CloudWriteUncertainError';}
@@ -39,6 +42,9 @@ export class LiveVault {
   private statementConflictResolver:((items:readonly DocumentEditCollision[])=>boolean|Promise<boolean>)|null=null;
   private ruleConflictResolver:((items:readonly RuleEditCollision[])=>boolean|Promise<boolean>)|null=null;
   private mutationWarning:string|null=null;
+  // An ambiguous write must never be retried from a stale in-memory base.
+  private rulesNeedRefresh=false;
+  private assetsNeedRefresh=false;
   private hasRemote=false;
   private sessionExportable=false;
   private hasLegacy=false;
@@ -66,6 +72,18 @@ export class LiveVault {
     try{approved=await resolver(items);}
     catch{throw new CloudEditCancelledError(`${domain}の確認画面を開けなかったため保存を停止しました。`);}
     if(!approved)throw new CloudEditCancelledError(`${domain}の同時編集があったため保存を中止しました。OneDriveの既存内容は変更されていません。`);
+  }
+
+  /** Stop repeat writes until a complete successful vault refresh reconciles the remote state. */
+  private uncertainWrite(domain:'rules'|'assets',reason:unknown):never {
+    if(domain==='rules')this.rulesNeedRefresh=true;
+    else this.assetsNeedRefresh=true;
+    const label=domain==='rules'?'利用先ルール・カテゴリー':'資産設定';
+    const detail=reason instanceof Error?`（原因：${reason.message}）`:'';
+    throw new CloudWriteUncertainError(
+      `${label}はOneDriveに保存済みの可能性があります。保存結果が未確認のため再保存を停止しました。通信回復後に設定の「最新データを取得」で最新データを確認してください。${detail}`,
+      reason,
+    );
   }
 
   get unlocked():boolean{return this.key!==null;}
@@ -106,7 +124,7 @@ export class LiveVault {
     return clone(this.assetsDocument);
   }
   conflicts():number{return [...this.shards.values()].reduce((count,s)=>count+s.document.conflicts.length,0);}
-  lock():void{this.mutationWarning=null;this.dataSetId=null;this.client.setVaultDataSet?.(null);this.key=null;this.salt='';this.sessionExportable=false;this.shards.clear();this.index=emptyIndex();this.rulesDocument=emptyRules();this.rulesRef=null;this.assetsDocument=emptyAssets();this.assetsRef=null;}
+  lock():void{this.mutationWarning=null;this.dataSetId=null;this.client.setVaultDataSet?.(null);this.key=null;this.salt='';this.sessionExportable=false;this.shards.clear();this.index=emptyIndex();this.rulesDocument=emptyRules();this.rulesRef=null;this.assetsDocument=emptyAssets();this.assetsRef=null;this.rulesNeedRefresh=false;this.assetsNeedRefresh=false;}
   /** Export a key only after an explicit opt-in unlock; immediately make the working key non-extractable. */
   async exportTabKey():Promise<{salt:string;key:string;dataSetId:string|null}> {
     if(!this.key||!this.sessionExportable)throw new Error('セッション保存が有効ではありません。');
@@ -514,6 +532,7 @@ export class LiveVault {
     await this.commitMerchantRules(next);
   }
   private async commitMerchantRules(local:MerchantRulesDocument):Promise<void> {
+    if(this.rulesNeedRefresh)this.uncertainWrite('rules',null);
     if(!this.key)throw new Error('保管庫がロックされています。');
     await this.assertActiveGeneration();
     if(typeof this.client.writeMerchantRules!=='function')throw new Error('OneDriveの利用先ルール保存機能がありません。');
@@ -525,17 +544,26 @@ export class LiveVault {
       const collisions=detectRuleEditCollisions(base,local,remoteDoc);
       await this.approveCollision(collisions,this.ruleConflictResolver,'利用先ルール・カテゴリー');
       const merged=mergeRules(base,local,remoteDoc,new Date().toISOString(),undefined,collisions.length>0);
+      const encrypted=await encryptRules(merged,key,this.salt);
+      let writeReturned=false;
       try {
-        const result=await this.client.writeMerchantRules(await encryptRules(merged,key,this.salt),remote?{id:remote.id,etag:remote.etag}:null);
+        const result=await this.client.writeMerchantRules(encrypted,remote?{id:remote.id,etag:remote.etag}:null);
+        writeReturned=true;
         if(result?.id&&result.etag){
           this.rulesDocument=merged;this.rulesRef={id:result.id,etag:result.etag};
         } else {
+          // The upload resolved without a usable ETag. The read-back itself may fail.
           const verified=await this.readMerchantRules(key,this.salt);
-          if(!verified.ref||JSON.stringify(verified.document)!==JSON.stringify(merged))throw new CloudWriteUncertainError('利用先ルールの保存結果を確認できません。再取得して照合してください。',null);
+          if(!verified.ref||JSON.stringify(verified.document)!==JSON.stringify(merged))
+            throw new Error('保存先の内容を今回の変更と照合できませんでした。');
           this.rulesDocument=verified.document;this.rulesRef=verified.ref;
         }
         return;
-      }catch(error){if(isConflict(error))continue;throw error;}
+      }catch(error){
+        if(!writeReturned&&isConflict(error))continue;
+        if(writeReturned||!isDefiniteWriteRejection(error))this.uncertainWrite('rules',error);
+        throw error;
+      }
     }
     throw new Error('利用先ルールの同時更新が続いています。再試行してください。');
   }
@@ -649,6 +677,7 @@ export class LiveVault {
   /** A single serialized assets document is saved with Graph ETag and three-way merge. */
   private assetsSaving=false;
   private async commitAssets(local:AssetsDocument):Promise<void> {
+    if(this.assetsNeedRefresh)this.uncertainWrite('assets',null);
     await this.assertActiveGeneration();
     if(!this.key)throw new Error('OneDrive保管庫がロックされています。');
     if(typeof this.client.writeAssetSettings!=='function')throw new Error('OneDriveの資産設定保存機能がありません。');
@@ -669,17 +698,25 @@ export class LiveVault {
           if(!approved)throw new CloudEditCancelledError('同時編集のため保存を中止しました。OneDriveの内容は変更されていません。');
         }
         const merged=mergeAssets(base,local,current,new Date().toISOString(),collisions.length>0);
+        const encrypted=await encryptAssets(merged,key,this.salt);
+        let writeReturned=false;
         try {
-          const result=await this.client.writeAssetSettings(await encryptAssets(merged,key,this.salt),remote?{id:remote.id,etag:remote.etag}:null);
+          const result=await this.client.writeAssetSettings(encrypted,remote?{id:remote.id,etag:remote.etag}:null);
+          writeReturned=true;
           if(result?.id&&result.etag){
             this.assetsDocument=merged;this.assetsRef={id:result.id,etag:result.etag};
           }else{
             const verified=await this.readAssets(key,this.salt);
-            if(!verified.ref||JSON.stringify(verified.document)!==JSON.stringify(merged))throw new Error('資産設定の保存結果を確認できません。最新データを取得してください。');
+            if(!verified.ref||JSON.stringify(verified.document)!==JSON.stringify(merged))
+              throw new Error('保存先の内容を今回の変更と照合できませんでした。');
             this.assetsDocument=verified.document;this.assetsRef=verified.ref;
           }
           return;
-        }catch(error){if(isConflict(error))continue;throw error;}
+        }catch(error){
+          if(!writeReturned&&isConflict(error))continue;
+          if(writeReturned||!isDefiniteWriteRejection(error))this.uncertainWrite('assets',error);
+          throw error;
+        }
       }
       throw new Error('資産設定の同時更新が続いています。再試行してください。');
     }finally{this.assetsSaving=false;}
@@ -845,6 +882,8 @@ export class LiveVault {
     const assets=await this.readAssets(this.key,this.salt);
     this.index=index;this.shards=shards;this.rulesDocument=rules.document;this.rulesRef=rules.ref;
     this.assetsDocument=assets.document;this.assetsRef=assets.ref;
+    // Only after *all* cloud reads succeed is another mutation safe.
+    this.rulesNeedRefresh=false;this.assetsNeedRefresh=false;
     return this.records();
   }
   async original(id:string):Promise<Uint8Array|null> {

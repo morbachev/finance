@@ -8,6 +8,7 @@ test('明細管理の初期年月は暦に従い、保存済みデータの最�
   const main=readFileSync(new URL('../src/main.ts',import.meta.url),'utf8');
   assert.match(main,/let manageYear = initialCalendar\.year;/);
   assert.match(main,/let manageMonth = initialCalendar\.month;/);
-  assert.match(main,/if \(manageMonth !== 'all' && !months.includes\(manageMonth\)\) months\.push\(manageMonth\)/);
+  assert.match(main,/function manageChangePeriod/);
+  assert.match(main,/function manageShiftMonth/);
   assert.deepEqual(filteredStatementIndices([{billingMonth:'2026-10'}],'2026','11'),[]);
 });

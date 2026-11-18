@@ -34,12 +34,12 @@ test('管理画面: 取込画面と共通カード部品・STEP表記を使用�
   const { readFileSync } = await import('node:fs');
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const js = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
-  assert.match(html, /id="manage-filter-year"/);
-  assert.match(html, /id="manage-filter-month"/);
+  assert.match(html, /id="manage-prev-month"/);
+  assert.match(html, /id="manage-period"/);
   assert.match(html, /STEP 01[\s\S]*STEP 02/);
   assert.doesNotMatch(html, /id="manage-back"/);
   assert.match(js, /function createStatementEntry/);
   assert.match(js, /managerList\.append\(createStatementEntry\(index, false\)\)/);
   assert.match(js, /list\.append\(createStatementEntry\(index, true\)\)/);
-  assert.match(html, /id="manage-total" class="numeric-input"/);
+  assert.doesNotMatch(html, /id="manage-total"/);
 });

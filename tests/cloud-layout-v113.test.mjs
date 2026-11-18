@@ -13,7 +13,13 @@ test('OneDriveの通常画面は状態・主要操作を表示し設定・テス
   assert.ok(html.indexOf('id="cloud-live-refresh"')<begin);
   assert.ok(html.indexOf('id="cloud-client-id"')>begin);
   assert.ok(html.indexOf('id="cloud-upload"')>begin);
-  assert.match(html,/<details class="cloud-probe-details">/);
+  // finance-ui-validation-v145-fix: v1.4.5 keeps the test controls visible inside detailed settings.
+  if (html.includes('class="panel cloud-panel cloud-probe-panel cloud-dev-test"')) {
+    assert.match(html, /<section class="panel cloud-panel cloud-probe-panel cloud-dev-test">/);
+    assert.doesNotMatch(html, /<details class="cloud-probe-details">/);
+  } else {
+    assert.match(html, /<details class="cloud-probe-details">/);
+  }
   for(const id of ['cloud-status','cloud-folder-check','cloud-live-migrate','cloud-upload','cloud-download','cloud-login','cloud-logout','cloud-account','cloud-live-status']){
     assert.equal((html.match(new RegExp(`id="${id}"`,'g'))??[]).length,1,`${id} should exist once`);
   }

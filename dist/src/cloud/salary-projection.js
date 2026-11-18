@@ -1,0 +1,125 @@
+/** Read-only bank balance projection including clearly labelled, unconfirmed salary estimates.
+ * Neither the monthly estimate nor the input salary is persisted to Finance/OneDrive.
+ */
+import { forecastAssets } from './asset-projection.js';
+import { recurringInMonth } from './recurring-schedule.js';
+import { monthlyReport } from '../summary/monthly-summary.js';
+import { mizuhoTransferForBill } from './mizuho-transfer.js';
+const period = (date) => date.slice(0, 7);
+const monthIndex = (date) => Number(date.slice(0, 4)) * 12 + Number(date.slice(5, 7));
+const monthFromIndex = (value) => `${Math.floor((value - 1) / 12)}-${String(((value - 1) % 12) + 1).padStart(2, '0')}`;
+const validDay = (day) => /^\d{4}-\d{2}-\d{2}$/.test(day) && !Number.isNaN(Date.parse(day + 'T00:00:00Z')) && new Date(day + 'T00:00:00Z').toISOString().slice(0, 10) === day;
+const snapshotDay = (snap) => {
+    const d = new Date(snap.observedAt);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+const payday = (month, day) => {
+    const year = Number(month.slice(0, 4)), mm = Number(month.slice(5, 7));
+    const last = new Date(Date.UTC(year, mm, 0)).getUTCDate();
+    return `${month}-${String(Math.min(day, last)).padStart(2, '0')}`;
+};
+const sane = (amount) => Number.isSafeInteger(amount) && amount >= 0;
+/** Forecast a missing normal main-job salary from an actual recent salary, not from a bonus.
+ * Never project more than the current and next month in account balance widgets.
+ */
+export function expectedMainSalaries(entries, today, until) {
+    if (!validDay(today) || !validDay(until) || until < today)
+        return [];
+    const current = monthIndex(today), last = monthIndex(until);
+    const past = entries.filter(item => item.employerId === 'main' && item.kind === 'salary' &&
+        validDay(item.paidOn) && item.paidOn <= today && sane(item.netPay))
+        .sort((a, b) => b.paidOn.localeCompare(a.paidOn) || b.revision - a.revision);
+    const latest = past[0];
+    if (!latest || current - monthIndex(latest.paidOn) > 2)
+        return [];
+    let amount = latest.netPay;
+    let method = 'previous-net';
+    if (latest.grossPay !== null && latest.taxablePay !== null &&
+        sane(latest.grossPay) && sane(latest.taxablePay) && latest.taxablePay <= latest.grossPay) {
+        const taxFree = latest.grossPay - latest.taxablePay;
+        if (taxFree <= latest.netPay) {
+            amount = latest.netPay - taxFree;
+            method = 'net-excluding-nontaxable';
+        }
+    }
+    if (!sane(amount) || amount === 0)
+        return [];
+    const result = [];
+    for (let i = current; i <= Math.min(last, current + 1); i++) {
+        const month = monthFromIndex(i);
+        if (entries.some(item => item.employerId === 'main' && item.kind === 'salary' && period(item.paidOn) === month))
+            continue;
+        const date = payday(month, Number(latest.paidOn.slice(8, 10)));
+        if (date <= until)
+            result.push({ date, amount, sourceMonth: period(latest.paidOn), method });
+    }
+    return result;
+}
+/** Extend the existing confirmed-only calculation, never replace its saved values.
+ * If a salary-named recurring bank income exists in the same month, trust the
+ * explicit user-managed schedule instead of adding an additional estimate.
+ */
+export function forecastBankBalances(doc, asOf, records, income, payrollDepositAccount, today) {
+    const accounts = forecastAssets(doc, asOf, records, income, payrollDepositAccount);
+    const estimatedByAccount = {};
+    const cardDebitByAccount = {};
+    const autoTransferByAccount = {};
+    const months = new Set(records.map(r => r.statement.paymentDate?.slice(0, 7)).filter((p) => !!p && /^\d{4}-(0[1-9]|1[0-2])$/.test(p) && p <= monthFromIndex(monthIndex(asOf) + 1)));
+    for (const month of months) {
+        const report = monthlyReport(month, { records, rules: [], categories: [], assets: doc,
+            payroll: { ready: false, syncedAt: null, entries: [] } });
+        for (const line of report.cardLines) {
+            const transfer = mizuhoTransferForBill(line, doc);
+            if (transfer) {
+                for (const [id, sign] of [['rakuten-bank', -1], ['mizuho-bank', 1]]) {
+                    const forecast = accounts[id];
+                    if (forecast.balance === null || !forecast.baseline || transfer.date <= snapshotDay(forecast.baseline) || transfer.date > asOf)
+                        continue;
+                    forecast.balance += sign * transfer.amount;
+                    if (!Number.isSafeInteger(forecast.balance))
+                        throw Error('送金予測額が大きすぎます。');
+                    autoTransferByAccount[id] = (autoTransferByAccount[id] ?? 0) + sign * transfer.amount;
+                }
+            }
+            const account = doc.cardDebitAccounts?.[line.cardId];
+            if (!account)
+                continue;
+            const balance = accounts[account];
+            if (balance.balance === null || !balance.baseline)
+                continue;
+            if (line.paymentDate > snapshotDay(balance.baseline) && line.paymentDate <= asOf) {
+                const after = balance.balance - line.amount;
+                if (!Number.isSafeInteger(after))
+                    throw Error('カード引落見込み額が大きすぎます。');
+                balance.balance = after;
+                cardDebitByAccount[account] = (cardDebitByAccount[account] ?? 0) + line.amount;
+            }
+        }
+    }
+    if (!payrollDepositAccount || !['rakuten-bank', 'cash-savings'].includes(payrollDepositAccount) || asOf < today)
+        return { accounts, estimatedByAccount, estimates: [], cardDebitByAccount, autoTransferByAccount };
+    const balance = accounts[payrollDepositAccount];
+    if (balance.balance === null || !balance.baseline)
+        return { accounts, estimatedByAccount, estimates: [], cardDebitByAccount, autoTransferByAccount };
+    const baselineDay = snapshotDay(balance.baseline);
+    const estimates = expectedMainSalaries(income, today, asOf).filter(estimate => {
+        if (estimate.date <= baselineDay)
+            return false;
+        return !recurringInMonth(period(estimate.date), doc.recurring).some(event => event.entry.kind === 'income' && event.entry.toAccountId === payrollDepositAccount &&
+            /給与|給料|salary|payroll/i.test(event.entry.name));
+    });
+    let sum = 0;
+    for (const item of estimates) {
+        sum += item.amount;
+        if (!Number.isSafeInteger(sum))
+            throw new Error('給与見込みの集計額が大きすぎます。');
+    }
+    if (sum) {
+        const next = balance.balance + sum;
+        if (!Number.isSafeInteger(next))
+            throw new Error('口座残高の見込み額が大きすぎます。');
+        balance.balance = next;
+        estimatedByAccount[payrollDepositAccount] = sum;
+    }
+    return { accounts, estimatedByAccount, estimates, cardDebitByAccount, autoTransferByAccount };
+}

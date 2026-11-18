@@ -13,20 +13,36 @@ let initializing = null;
 let activeId = '';
 let busy = false;
 let verified = false;
+let reauthenticationRequired = false; /* finance-v146-noninteractive-check */
 const account = () => msal?.getActiveAccount() ?? msal?.getAllAccounts()[0] ?? null;
-function status(text, kind = 'neutral') { const el = $('cloud-status'); el.textContent = text; el.className = `cloud-status ${kind}`; }
+let cloudStatusTimer; /* finance-settings-v144 */
+function status(text, kind = 'neutral') {
+    const el = $('cloud-status');
+    if (cloudStatusTimer) {
+        clearTimeout(cloudStatusTimer);
+        cloudStatusTimer = undefined;
+    }
+    el.textContent = text;
+    el.className = `cloud-status ${kind}${text ? '' : ' hidden'}`;
+    if (text && kind !== 'error')
+        cloudStatusTimer = setTimeout(() => {
+            el.classList.add('hidden');
+            cloudStatusTimer = undefined;
+        }, 5000);
+}
 function updateUi() {
     const id = $('cloud-client-id').value.trim();
     const connected = !!account() && activeId === id;
     $('cloud-save-id').toggleAttribute('disabled', busy || !validId(id));
-    $('cloud-login').toggleAttribute('disabled', busy || !validId(id) || connected);
+    $('cloud-login').toggleAttribute('disabled', busy || !validId(id) || (connected && !reauthenticationRequired));
+    $('cloud-login').textContent = connected && reauthenticationRequired ? 'Microsoftアカウントを再接続' : 'Microsoftアカウントで接続';
     $('cloud-logout').toggleAttribute('disabled', busy || !connected);
     $('cloud-folder-check').toggleAttribute('disabled', busy || !connected);
     $('cloud-vault-diagnose').toggleAttribute('disabled', busy || !connected);
     $('cloud-diagnostic-copy').toggleAttribute('disabled', busy || !$('cloud-diagnostic-report').textContent?.trim());
     $('cloud-upload').toggleAttribute('disabled', busy || !connected);
     $('cloud-download').toggleAttribute('disabled', busy || !connected);
-    $('cloud-account').textContent = connected ? `接続中：${account()?.username || 'Microsoftアカウント'}` : '未接続';
+    $('cloud-account').textContent = connected ? (account()?.username || 'Microsoftアカウント') : '';
 }
 async function ensureMsal() {
     const id = $('cloud-client-id').value.trim();
@@ -82,6 +98,23 @@ export async function graphClient() {
         throw new Error('Microsoft認証画面へ移動しています。');
     }
 }
+/** This explicit check never opens a login screen or changes the account. */
+async function graphClientWithoutRedirect() {
+    const instance = await ensureMsal();
+    const current = account();
+    if (!current)
+        throw new Error('Microsoftアカウントが未接続です。上の「接続」からログインしてください。');
+    try {
+        const token = await instance.acquireTokenSilent({ scopes: SCOPES, account: current });
+        reauthenticationRequired = false;
+        return new OneDriveTestClient(token.accessToken);
+    }
+    catch {
+        reauthenticationRequired = true;
+        updateUi();
+        throw new Error('Microsoftアカウントの認証を確認できません。必要な場合は「Microsoftアカウントを再接続」を選択してください。');
+    }
+}
 export function initCloudSettings(handlers) {
     let id = '';
     try {
@@ -128,8 +161,14 @@ export function initCloudSettings(handlers) {
             if (localStorage.getItem(CLIENT_KEY) !== value)
                 throw new Error('先にClient IDを保存してください。');
             const instance = await ensureMsal();
-            if (account())
+            if (account()) {
+                if (!reauthenticationRequired)
+                    return;
+                if (!window.confirm('Microsoftアカウントの認証画面を開いて再接続しますか？'))
+                    return;
+                await instance.acquireTokenRedirect({ scopes: SCOPES, account: account() });
                 return;
+            }
             if (!window.confirm('Microsoftログインへ移動します。未保存の編集がある場合は破棄されます。続行しますか？'))
                 return;
             await instance.loginRedirect({ scopes: SCOPES, prompt: 'select_account' });
@@ -149,9 +188,23 @@ export function initCloudSettings(handlers) {
     });
     $('cloud-folder-check').addEventListener('click', () => {
         void action(async () => {
-            await (await graphClient()).appFolderId();
-            verified = true;
-            status('OneDriveのアプリ専用フォルダに接続できました。', 'ok');
+            const button = $('cloud-folder-check');
+            button.textContent = '確認中…';
+            let timer;
+            try {
+                // A GET to the app folder, not an upload and not a redirect to sign-in.
+                const request = (async () => { await (await graphClientWithoutRedirect()).appFolderId(); })();
+                await Promise.race([request, new Promise((_resolve, reject) => {
+                        timer = setTimeout(() => reject(new Error('接続確認が時間内に完了しませんでした。ネットワークを確認してください。')), 15000);
+                    })]);
+                verified = true;
+                status('保存先にアクセスできました。', 'ok');
+            }
+            finally {
+                if (timer)
+                    clearTimeout(timer);
+                button.textContent = '保存先を確認';
+            }
         });
     });
     $('cloud-vault-diagnose').addEventListener('click', () => {
@@ -229,7 +282,7 @@ export function initCloudSettings(handlers) {
                     clearPasswordField(id);
                 message.textContent = '新しいパスフレーズへの変更が完了しました。別端末では新しいパスフレーズで解除してください。';
                 message.className = 'cloud-status ok';
-                $('cloud-rotate-details').open = false;
+                // The passphrase form stays visible after successful changes. /* finance-v145 */
                 status('暗号化パスフレーズを変更しました。', 'ok');
             }
             catch (error) {
@@ -252,6 +305,6 @@ export function initCloudSettings(handlers) {
     if (id && validId(id))
         void action(async () => {
             await ensureMsal();
-            status(account() ? 'Microsoftアカウントへの接続を確認しました。' : 'Client ID設定済み。Microsoftアカウントにログインしてください。', account() ? 'ok' : 'neutral');
+            updateUi();
         });
 }

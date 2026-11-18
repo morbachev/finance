@@ -1,5 +1,6 @@
 /** Read-only asset forecast: no remote writes, guessed debit accounts, or future salary estimates. */
-import { ASSET_ACCOUNTS } from './assets.js';
+import { ASSET_ACCOUNTS, oneTimeAccountDelta, recurringCoveredByOneTime } from './assets.js';
+import { recurringOccursOn } from './recurring-schedule.js'; /* finance-monthly-v142 */
 import { depositedIncomeBetween } from './payroll-income.js';
 function dayString(date) {
     const y = date.getFullYear(), m = String(date.getMonth() + 1).padStart(2, '0'), d = String(date.getDate()).padStart(2, '0');
@@ -16,17 +17,6 @@ function validDay(day) {
     return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === day;
 }
 function snapshotDay(s) { return dayString(new Date(s.observedAt)); }
-function occurrence(entry, day) {
-    if (!entry.enabled || day < entry.startOn || (entry.endOn !== null && day > entry.endOn))
-        return false;
-    const yy = Number(day.slice(0, 4)), mm = Number(day.slice(5, 7)), dd = Number(day.slice(8, 10));
-    if (entry.frequency === 'weekly')
-        return new Date(`${day}T00:00:00Z`).getUTCDay() === entry.weekday;
-    if (entry.frequency === 'yearly' && mm !== entry.monthOfYear)
-        return false;
-    const last = new Date(Date.UTC(yy, mm, 0)).getUTCDate();
-    return dd === (entry.dayOfMonth === 0 ? last : Math.min(entry.dayOfMonth, last));
-}
 function accountDelta(entry, account) {
     if (entry.fromAccountId === account)
         return -entry.amount;
@@ -74,13 +64,13 @@ export function forecastAssets(doc, asOf, records = [], payrollIncome = [], payr
         found.sort((a, b) => b.observedAt.localeCompare(a.observedAt) || b.id.localeCompare(a.id));
         const baseline = found[0] ?? null;
         if (!baseline) {
-            result[account.id] = { accountId: account.id, baseline: null, balance: null, recurringDelta: 0, cardNisaDelta: 0, payrollDelta: 0, forecastEvents: 0, warning: '基準残高を登録してください。' };
+            result[account.id] = { accountId: account.id, baseline: null, balance: null, recurringDelta: 0, oneTimeDelta: 0, cardNisaDelta: 0, payrollDelta: 0, forecastEvents: 0, warning: '基準残高を登録してください。' };
             continue;
         }
         const start = snapshotDay(baseline);
         const from = Date.parse(`${start}T00:00:00Z`), to = Date.parse(`${asOf}T00:00:00Z`);
         if (!Number.isFinite(from) || !Number.isFinite(to) || to - from > 366 * 10 * 86400000) {
-            result[account.id] = { accountId: account.id, baseline, balance: null, recurringDelta: 0, cardNisaDelta: 0, payrollDelta: 0, forecastEvents: 0, warning: '基準残高が古いため、確認済み残高を更新してください。' };
+            result[account.id] = { accountId: account.id, baseline, balance: null, recurringDelta: 0, oneTimeDelta: 0, cardNisaDelta: 0, payrollDelta: 0, forecastEvents: 0, warning: '基準残高が古いため、確認済み残高を更新してください。' };
             continue;
         }
         let recurringDelta = 0, forecastEvents = 0;
@@ -89,10 +79,21 @@ export function forecastAssets(doc, asOf, records = [], payrollIncome = [], payr
             const day = new Date(t).toISOString().slice(0, 10);
             for (const entry of doc.recurring) {
                 const delta = accountDelta(entry, account.id);
-                if (delta !== 0 && occurrence(entry, day)) {
+                if (delta !== 0 && recurringOccursOn(entry, day) && !recurringCoveredByOneTime(entry, day, doc.oneTime)) {
                     recurringDelta += delta;
                     forecastEvents++;
                 }
+            }
+        }
+        // Do not replay movements already incorporated in a manually checked balance.
+        let oneTimeDelta = 0;
+        for (const entry of doc.oneTime ?? []) {
+            if (entry.date <= start || entry.date > asOf)
+                continue;
+            const delta = oneTimeAccountDelta(entry, account.id);
+            if (delta !== 0) {
+                oneTimeDelta += delta;
+                forecastEvents++;
             }
         }
         let cardNisaDelta = 0;
@@ -105,10 +106,10 @@ export function forecastAssets(doc, asOf, records = [], payrollIncome = [], payr
         // never infer projected pay or the deposit account. No card debit here.
         const payrollDelta = payrollDepositAccount === account.id
             ? depositedIncomeBetween(payrollIncome, start, asOf) : 0;
-        const balance = baseline.balance + recurringDelta + cardNisaDelta + payrollDelta;
+        const balance = baseline.balance + recurringDelta + oneTimeDelta + cardNisaDelta + payrollDelta;
         if (!Number.isSafeInteger(balance))
             throw new Error('残高予測の金額が上限を超えています。');
-        result[account.id] = { accountId: account.id, baseline, balance, recurringDelta, cardNisaDelta, payrollDelta, forecastEvents,
+        result[account.id] = { accountId: account.id, baseline, balance, recurringDelta, oneTimeDelta, cardNisaDelta, payrollDelta, forecastEvents,
             warning: account.id === 'nisa' ? '評価額の変動は含まず、積立額のみを加算した参考値です。' : null };
     }
     return result;

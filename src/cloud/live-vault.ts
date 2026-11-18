@@ -1,3 +1,4 @@
+import { validateMizuhoPlan } from './assets.js';
 /** Cloud-first, annual-shard vault. IndexedDB is only opened by the explicit legacy import UI. */
 import type { ParsedStatement } from '../models/types.js';
 import type { LocalSource } from '../storage/encrypted-vault.js';
@@ -5,7 +6,7 @@ import { OneDriveTestClient, GraphError } from './onedrive-api.js';
 import { decryptDocument, decryptIndex, decryptOriginal, deriveCloudKey, encryptDocument, encryptIndex, encryptOriginal, encryptRules, decryptRules, freshSalt, parseEnvelope, parseIndexEnvelope } from './cloud-crypto.js';
 import { emptyDocument, mergeDocuments, type CloudDocument, type CloudRecord } from './merge.js';
 import { emptyIndex, statementBucket, type FinanceIndex, type YearBucket, validateIndex } from './layout.js';
-import { emptyAssets, mergeAssets, validateSnapshot, validateRecurring, type AssetsDocument, type BalanceSnapshot, type RecurringEntry, type NisaCardRule, validateNisaCardRule, validatePayrollAutoPassphrase } from './assets.js';
+import { emptyAssets, mergeAssets, validateSnapshot, validateRecurring, validateOneTime, type OneTimeEntry, type AssetsDocument, type AssetAccountId, type BalanceSnapshot, type RecurringEntry, type NisaCardRule, validateNisaCardRule, validatePayrollAutoPassphrase, validateBirthMonth, validateCardDebitAccounts } from './assets.js';
 import { encryptAssets, decryptAssets } from './cloud-crypto.js';
 import { emptyRules, mergeRules, validateRule, validateCategory, listCategories, PALETTE, CATEGORIES, type CategoryDefinition, type CategoryId, type PaletteId, type MerchantRule, type MerchantRulesDocument } from './merchant-rules.js';
 
@@ -534,6 +535,25 @@ export class LiveVault {
     next.deletedSnapshots.push(id);
     await this.commitAssets(next);
   }
+  /** Single dated movements are encrypted with the rest of assets.enc. */
+  async upsertOneTime(entry:OneTimeEntry):Promise<void> {
+    if(!this.key)throw new Error('OneDrive保管庫を解除してください。');
+    const valid=validateOneTime(entry),next=clone(this.assetsDocument);
+    if(next.deletedOneTime?.includes(valid.id))throw new Error('削除済みの入出金IDは再利用できません。');
+    const items=next.oneTime??[];
+    const i=items.findIndex(e=>e.id===valid.id);
+    if(i>=0)items[i]=valid;else items.push(valid);
+    next.oneTime=items;
+    await this.commitAssets(next);
+  }
+  async deleteOneTime(id:string):Promise<void> {
+    if(!this.key)throw new Error('OneDrive保管庫を解除してください。');
+    const next=clone(this.assetsDocument);
+    if(!next.oneTime?.some(e=>e.id===id))throw new Error('対象の単発入出金が見つかりません。');
+    next.oneTime=next.oneTime.filter(e=>e.id!==id);
+    next.deletedOneTime=[...(next.deletedOneTime??[]),id];
+    await this.commitAssets(next);
+  }
   async upsertRecurring(entry:RecurringEntry):Promise<void> {
     if(!this.key)throw new Error('OneDrive保管庫を解除してください。');
     const valid=validateRecurring(entry),next=clone(this.assetsDocument);
@@ -559,6 +579,26 @@ export class LiveVault {
     if(!this.key)throw new Error('OneDrive保管庫を解除してください。');
     const next=clone(this.assetsDocument);
     next.nisaCardRule=validateNisaCardRule(rule);
+    await this.commitAssets(next);
+  }
+  async setBirthMonth(value:string|null):Promise<void> {
+    if(!this.key)throw new Error('保管庫を解除してください。');
+    const next=clone(this.assetsDocument);
+    const born=validateBirthMonth(value);
+    if(born)next.birthMonth=born;else delete next.birthMonth;
+    await this.commitAssets(next);
+  }
+  async setMizuhoTransferPlan(value:import('./assets.js').MizuhoTransferPlan):Promise<void> {
+    if(!this.key)throw new Error('保管庫を解除してください。');
+    const next=clone(this.assetsDocument);
+    next.mizuhoTransferPlan=validateMizuhoPlan(value);
+    if(value.enabled)next.cardDebitAccounts={...next.cardDebitAccounts,'rakuten-mizuho':'mizuho-bank'};
+    await this.commitAssets(next);
+  }
+  async setCardDebitAccounts(value:Record<string,AssetAccountId>):Promise<void> {
+    if(!this.key)throw new Error('保管庫を解除してください。');
+    const next=clone(this.assetsDocument);
+    next.cardDebitAccounts=validateCardDebitAccounts(value)??{};
     await this.commitAssets(next);
   }
   async deleteRecurring(id:string):Promise<void> {

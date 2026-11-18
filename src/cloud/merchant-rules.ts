@@ -72,6 +72,8 @@ export function categoryMeta(id:CategoryId|null|undefined,overrides?:Partial<Rec
 export interface MerchantRule {
   id: string;
   pattern: string;
+  /** Additional alternatives sharing this rule's display name, category and priority. */
+  patterns?: string[];
   mode: MatchMode;
   displayName: string;
   cardId: string | null;
@@ -112,7 +114,17 @@ export function validateRule(rule:MerchantRule): MerchantRule {
     typeof rule.enabled!=='boolean' || !Number.isSafeInteger(rule.priority) || rule.priority<0 || rule.priority>1000 ||
     (rule.categoryId !== undefined && rule.categoryId !== null && !categoryIds.has(rule.categoryId) && !customCategoryId.test(rule.categoryId)))
     throw new Error('利用先ルールの内容が不正です。');
-  return {...rule,pattern:rule.pattern.trim(),displayName:rule.displayName.trim()};
+  // Backward compatible: old encrypted rules have only `pattern`. /* finance-v147 */
+  const extra=rule.patterns;
+  if(extra!==undefined && (!Array.isArray(extra)||extra.length>19||
+      extra.some(p=>typeof p!=='string'||!normalizeMerchant(p)||p.length>200)))
+    throw new Error('利用先の追加条件が不正です。');
+  const list=[rule.pattern,...(extra??[])];
+  if(new Set(list.map(normalizeMerchant)).size!==list.length)
+    throw new Error('同じ利用先条件は1度だけ登録してください。');
+  return {...rule,pattern:rule.pattern.trim(),
+    ...(extra!==undefined?{patterns:extra.map(p=>p.trim())}:{}),
+    displayName:rule.displayName.trim()};
 }
 export function validateRules(raw:unknown):MerchantRulesDocument {
   if(!raw || typeof raw!=='object')throw new Error('利用先ルールの形式が不正です。');
@@ -163,15 +175,18 @@ export function validateRules(raw:unknown):MerchantRulesDocument {
 const modeRank:Record<MatchMode,number>={exact:3,prefix:2,contains:1};
 export function sortedRules(rules:readonly MerchantRule[]):MerchantRule[] {
   return [...rules].sort((a,b)=> b.priority-a.priority || modeRank[b.mode]-modeRank[a.mode] ||
-    normalizeMerchant(b.pattern).length-normalizeMerchant(a.pattern).length || a.id.localeCompare(b.id));
+    Math.max(...[b.pattern,...(b.patterns??[])].map(p=>normalizeMerchant(p).length))-
+    Math.max(...[a.pattern,...(a.patterns??[])].map(p=>normalizeMerchant(p).length)) || a.id.localeCompare(b.id));
 }
 export function matchingRule(original:string, cardId:string|null, rules:readonly MerchantRule[]):MerchantRule|undefined {
   const merchant=normalizeMerchant(original);
   if(!merchant)return undefined;
   return sortedRules(rules).find(rule=>{
     if(!rule.enabled || (rule.cardId && rule.cardId!==cardId))return false;
-    const pattern=normalizeMerchant(rule.pattern);
-    return rule.mode==='exact'?merchant===pattern:rule.mode==='prefix'?merchant.startsWith(pattern):merchant.includes(pattern);
+    return [rule.pattern,...(rule.patterns??[])].some(term=>{
+      const pattern=normalizeMerchant(term);
+      return rule.mode==='exact'?merchant===pattern:rule.mode==='prefix'?merchant.startsWith(pattern):merchant.includes(pattern);
+    });
   });
 }
 export function displayMerchant(original:string,cardId:string|null,rules:readonly MerchantRule[],override?:string):string {
@@ -216,7 +231,7 @@ export function mergeRules(base:MerchantRulesDocument, local:MerchantRulesDocume
     if(!bv && lv && !rv){result.push(clone(lv));deleted.delete(id);continue;}
     if(!bv && rv && !lv){result.push(clone(rv));deleted.delete(id);continue;}
     const merged:Record<string,unknown>={};
-    for(const key of ['id','pattern','mode','displayName','cardId','enabled','priority','categoryId'] as const){
+    for(const key of ['id','pattern','patterns','mode','displayName','cardId','enabled','priority','categoryId'] as const){
       const value=field(id,key,bv?bv[key]:missing,lv?lv[key]:missing,rv?rv[key]:missing);
       if(value!==missing)merged[key]=value;
     }

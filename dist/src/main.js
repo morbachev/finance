@@ -9,10 +9,13 @@ import { clearTabSession, readTabSession, saveTabSession } from './cloud/tab-ses
 import { displayMerchant, matchingRule, sortedRules, normalizeMerchant, PALETTE } from './cloud/merchant-rules.js';
 import { importErrors, duplicateMonths } from './importers/batch-policy.js';
 import { prioritizedIndices, orderedPreviewRows } from './ui/preview-order.js';
-import { availableYears, availableMonths, calendarBillingPeriod, filteredStatementIndices } from './ui/manage-filter.js';
+import { calendarBillingPeriod, filteredStatementIndices } from './ui/manage-filter.js';
 import { recentMerchants } from './ui/recent-merchants.js';
 import { planCategoryBatch, categoryBatchChanged } from './ui/category-draft.js';
 import { initAssetsSettings } from './ui/assets-settings.js';
+import { initFutureProjection } from './ui/future-projection.js'; /* finance-v143 */
+import { canonicalStatementFilename } from './ui/statement-filename.js';
+import { initMonthlySummary } from './ui/monthly-summary.js'; /* finance-monthly-v140 */
 import { initPasswordFields, hidePasswordField, clearPasswordField } from './ui/password-fields.js';
 const $ = (id) => {
     const node = document.getElementById(id);
@@ -36,6 +39,8 @@ const originalSaved = new WeakSet();
 const dirty = new WeakSet();
 let liveVault = null;
 let assetsUi = null;
+let futureUi = null;
+let summaryUi = null;
 let currentModal = null;
 let autoSaveTimer;
 let cloudStartupRunning = false;
@@ -45,10 +50,15 @@ let clipboardHtml = '';
 let batchBusy = false;
 let filesBusy = false;
 let previewSort = null;
+let manageSort = null; /* finance-v145 */
 const initialCalendar = calendarBillingPeriod();
 let manageYear = initialCalendar.year;
 let manageMonth = initialCalendar.month;
+let manageReturnToSummary = false;
+let summaryReturnPageY = 0;
+let summaryReturnContentY = 0;
 let toastTimeout;
+let operationResultTimeout; /* finance-settings-v144 */
 let lastSavedAt = null;
 let editingRuleId = null;
 let rulesBusy = false;
@@ -151,10 +161,21 @@ function toast(text) {
 }
 function operationResult(message, kind = 'good') {
     const element = $('operation-result');
+    if (operationResultTimeout) {
+        clearTimeout(operationResultTimeout);
+        operationResultTimeout = undefined;
+    }
     element.className = `operation-result ${kind}`;
     element.textContent = message;
     if (kind === 'good')
         lastSavedAt = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    // Working state stays until completion; success vanishes. Problems stay long enough to read.
+    if (kind !== 'working') {
+        operationResultTimeout = setTimeout(() => {
+            element.classList.add('hidden');
+            operationResultTimeout = undefined;
+        }, kind === 'good' ? 4800 : kind === 'warn' ? 10000 : 15000);
+    }
 }
 function sessionStorageSafe() {
     try {
@@ -194,7 +215,7 @@ function createStatementEntry(index, withDelete) {
     const title = document.createElement('b');
     title.textContent = name;
     const subtitle = document.createElement('small');
-    subtitle.textContent = `${statement.billingMonth?.replace('-', '/') ?? '請求月不明'} · ${statement.sourceName}`;
+    subtitle.textContent = `${statement.billingMonth?.replace('-', '/') ?? '請求月不明'} · ${statement.sourceKind === 'pdf' ? canonicalStatementFilename(statement) : statement.sourceName}`;
     const right = div('statement-end');
     const amount = document.createElement('strong');
     amount.textContent = yen(statement.statedTotal);
@@ -403,7 +424,7 @@ function renderSummary() {
     const fixedWarnings = s.warnings.filter(w => !/請求金額と明細合計に差額|対象カードを選択|カードの種類を特定/.test(w));
     for (const w of fixedWarnings)
         notices.append(notice(w, needsReview(s) ? 'bad' : 'warn'));
-    $('source-meta').textContent = `${s.sourceKind === 'pdf' ? 'PDF' : 'コピー＆ペースト'} · ${s.sourceName} · 発行元 ${providerLabel(s.provider)}`;
+    $('source-meta').textContent = `${s.sourceKind === 'pdf' ? 'PDF' : 'コピー＆ペースト'} · ${s.sourceKind === 'pdf' ? canonicalStatementFilename(s) : s.sourceName} · 発行元 ${providerLabel(s.provider)}`;
 }
 function makeInput(value, className, update, ariaLabel) {
     const input = document.createElement('input');
@@ -482,6 +503,10 @@ function render() {
         renderManager();
     if (!$('rules-view').classList.contains('hidden'))
         renderRules();
+    if (!$('summary-view').classList.contains('hidden'))
+        summaryUi?.render();
+    if (!$('future-view').classList.contains('hidden'))
+        futureUi?.render();
 }
 function attachSource(statement, source) {
     if (source)
@@ -529,10 +554,11 @@ function appendCloudRecordsKeepingDrafts(records) {
 function updateCloudStatus(message) {
     const label = $('cloud-live-status');
     const bar = $('cloud-live-bar');
-    const state = !liveVault ? '未接続' : liveVault.unlocked ? '同期可能' : liveVault.exists ? 'ロック中' : '保管庫未作成';
-    const text = message ?? `OneDrive：${state}${liveVault?.unlocked ? ` / ${liveVault.records().length}件 / 競合履歴${liveVault.conflicts()}件` : ''}`;
-    label.textContent = text;
-    bar.textContent = text;
+    const state = !liveVault ? '未接続' : liveVault.unlocked ? '接続済み' : liveVault.exists ? 'ロック中' : '初期設定が必要';
+    label.textContent = `OneDrive：${state}`;
+    // Keep the global bar quiet when connected. Only missing access or an error needs attention.
+    const failure = message && /失敗|エラー|不備|接続してください|未保存|更新確認/.test(message);
+    bar.textContent = failure ? message : liveVault?.unlocked ? '' : `OneDrive：${state}`;
     $('cloud-live-migrate').classList.toggle('hidden', !liveVault);
 }
 async function startCloud() {
@@ -543,6 +569,7 @@ async function startCloud() {
         const client = await graphClient();
         liveVault = new LiveVault(client);
         assetsUi?.render();
+        futureUi?.render();
         const exists = await liveVault.discover();
         updateCloudStatus();
         if (exists) {
@@ -555,6 +582,7 @@ async function startCloud() {
                     appendCloudRecordsKeepingDrafts(liveVault.records());
                     renderRules();
                     assetsUi?.render();
+                    futureUi?.render();
                     void assetsUi?.refreshPayroll();
                     updateCloudStatus();
                     operationResult(`このタブの一時鍵で自動復号しました（${liveVault.records().length}件）。`);
@@ -593,6 +621,7 @@ async function refreshCloud() {
     replaceCloudRecords(await liveVault.refresh());
     renderRules();
     assetsUi?.render();
+    futureUi?.render();
     void assetsUi?.refreshPayroll();
     updateCloudStatus('OneDriveから最新の明細を取得しました。');
 }
@@ -612,15 +641,37 @@ async function migrateLegacy() {
         return;
     await askVault('migrate');
 }
+/** Mobile disclosure uses one state source for buttons, assistive tech and keyboard access. */
+function setMobileMenuOpen(requested) {
+    const isMobile = window.matchMedia('(max-width: 800px)').matches;
+    const expanded = requested && isMobile;
+    const sidebar = document.getElementById('finance-sidebar');
+    const toggle = document.getElementById('mobile-nav-toggle');
+    const panel = document.getElementById('mobile-nav-panel');
+    sidebar?.classList.toggle('mobile-open', expanded);
+    if (toggle) {
+        toggle.setAttribute('aria-expanded', String(expanded));
+        toggle.setAttribute('aria-label', expanded ? 'メニューを閉じる' : 'メニューを開く');
+        toggle.title = expanded ? 'メニューを閉じる' : 'メニューを開く';
+    }
+    if (panel)
+        panel.inert = isMobile && !expanded;
+}
 function showView(view) {
+    setMobileMenuOpen(false);
+    if (view !== 'manage')
+        manageReturnToSummary = false;
+    $('manage-back-summary').classList.toggle('hidden', view !== 'manage' || !manageReturnToSummary);
     $('import-view').classList.toggle('hidden', view !== 'import');
     $('manage-view').classList.toggle('hidden', view !== 'manage');
     $('rules-view').classList.toggle('hidden', view !== 'rules');
     $('settings-view').classList.toggle('hidden', view !== 'settings');
     $('assets-page').classList.toggle('hidden', view !== 'assets');
+    $('future-view').classList.toggle('hidden', view !== 'future'); /* finance-v148 */
+    $('summary-view').classList.toggle('hidden', view !== 'summary');
     // The overview already shows the cloud state; avoid repeating the global banner.
     $('cloud-live-bar').classList.toggle('hidden', view === 'settings');
-    for (const mode of ['import', 'manage', 'rules', 'assets', 'settings']) {
+    for (const mode of ['import', 'manage', 'summary', 'rules', 'assets', 'future', 'settings']) {
         const nav = $(`nav-${mode}`);
         nav.classList.toggle('active', view === mode);
         if (view === mode)
@@ -642,6 +693,16 @@ function showView(view) {
     }
     if (view === 'assets')
         assetsUi?.render();
+    if (view === 'future')
+        futureUi?.render();
+    if (view === 'summary')
+        summaryUi?.render();
+    // Switching menus always starts the destination at its top. Explicit
+    // 'back to summary' navigation restores its captured position afterward.
+    const content = document.querySelector('.workspace > .content');
+    if (content)
+        content.scrollTop = 0;
+    window.scrollTo(0, 0);
 }
 function managerIndices() {
     return filteredStatementIndices(statements, manageYear, manageMonth);
@@ -666,19 +727,25 @@ function setOptions(select, choices, selected) {
     select.value = selected;
 }
 function renderManagerFilters() {
-    const years = availableYears(statements);
-    if (manageYear !== 'all' && !years.includes(manageYear))
-        years.push(manageYear);
-    years.sort((a, b) => b.localeCompare(a));
-    const yearPicker = $('manage-filter-year');
-    setOptions(yearPicker, [['all', 'すべての年'], ...years.map(y => [y, `${y}年`])], manageYear);
-    const months = availableMonths(statements, manageYear);
-    if (manageMonth !== 'all' && !months.includes(manageMonth))
-        months.push(manageMonth);
-    months.sort((a, b) => b.localeCompare(a));
-    const monthPicker = $('manage-filter-month');
-    setOptions(monthPicker, [['all', 'すべての月'], ...months.map(m => [m, `${Number(m)}月`])], manageMonth);
+    const picker = $('manage-period');
+    picker.value = manageYear === 'all' || manageMonth === 'all' ? '' : `${manageYear}-${manageMonth}`;
+    $('manage-show-all').classList.toggle('active', manageYear === 'all' && manageMonth === 'all');
     return managerIndices();
+}
+function manageChangePeriod(period) {
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(period))
+        return;
+    manageYear = period.slice(0, 4);
+    manageMonth = period.slice(5);
+    selectVisibleManagerStatement();
+    renderManager();
+}
+function manageShiftMonth(offset) {
+    const current = manageYear !== 'all' && manageMonth !== 'all' ? `${manageYear}-${manageMonth}` :
+        `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+    const year = Number(current.slice(0, 4)), month = Number(current.slice(5, 7));
+    const target = new Date(Date.UTC(year, month - 1 + offset, 1));
+    manageChangePeriod(`${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, '0')}`);
 }
 function renderManager() {
     const indices = renderManagerFilters();
@@ -701,15 +768,26 @@ function renderManager() {
     renderCardOptions(s);
     $('manage-month').value = s.billingMonth ?? '';
     $('manage-payment').value = dateDisplay(s.paymentDate).replace('未取得', '');
-    $('manage-total').value = s.statedTotal === null ? '' : s.statedTotal.toLocaleString('ja-JP');
     $('manage-status').textContent = hasUnsavedChanges(s) ? 'OneDrive未保存' : `OneDrive保存済み${lastSavedAt ? ` · ${lastSavedAt}` : ''}`;
+    const originalButton = $('manage-original-download');
+    const savedId = savedIds.get(s);
+    originalButton.disabled = batchBusy || filesBusy || !liveVault?.unlocked || !savedId ||
+        !liveVault.records().some(record => record.id === savedId && !!record.originalId);
+    originalButton.title = s.sourceKind === 'pdf' ? '復号したPDFが端末のダウンロード先に保存されます。' : 'Web貼り付け明細にPDF原本はありません。';
     $('manage-save').disabled = batchBusy || filesBusy;
     $('manage-delete').disabled = batchBusy || filesBusy;
     const errorMessages = issues(s);
     $('manage-validation').textContent = errorMessages.length ? `要修正：${errorMessages.join(' / ')}` : '検証OK。保存済み明細の変更は自動反映されます。';
+    for (const [key, id, label] of [['usedOn', 'manage-sort-date', '利用日'], ['amount', 'manage-sort-amount', '金額']]) {
+        const button = $(id);
+        const active = manageSort?.key === key;
+        button.textContent = `${label} ${active ? (manageSort.direction === 'asc' ? '▲' : '▼') : '↕'}`;
+        button.closest('th')?.setAttribute('aria-sort', active ? (manageSort.direction === 'asc' ? 'ascending' : 'descending') : 'none');
+    }
     const body = $('manage-rows');
     body.replaceChildren();
-    for (const [index, row] of s.rows.entries()) {
+    // Sorting is display-only: deletions must continue to address original row indices.
+    for (const { index, row } of orderedPreviewRows(s.rows.map((row, index) => ({ row, index, usedOn: row.usedOn, amount: row.amount })), manageSort)) {
         const tr = document.createElement('tr');
         const fields = [
             [dateDisplay(row.usedOn), '利用日', value => {
@@ -744,24 +822,28 @@ function renderManager() {
         ];
         for (const [value, aria, update] of fields) {
             const td = document.createElement('td');
+            td.dataset.label = aria;
             const field = makeInput(value, aria === '金額' ? 'numeric-input' : '', update, aria);
             if (aria === '利用先') {
-                const cell = div('manage-merchant-control');
-                cell.append(field);
-                const line = div('manage-merchant-sub');
-                const original = document.createElement('small');
-                original.textContent = `原文：${row.merchant}`;
-                original.title = row.merchant;
-                const toRule = document.createElement('button');
-                toRule.type = 'button';
-                toRule.textContent = 'ルール化';
-                toRule.setAttribute('aria-label', `${row.merchant}から利用先ルールを作る`);
-                toRule.addEventListener('click', () => openRuleForRow(row, s));
-                line.append(original, toRule);
-                const meta = categoryFor(row, s);
-                if (meta)
-                    line.append(categoryChip(meta));
-                cell.append(line);
+                const cell = div('manage-merchant-control manage-merchant-quiet');
+                const main = div('manage-merchant-main');
+                main.append(field);
+                cell.append(main);
+                const secondary = div('manage-merchant-secondary');
+                const category = categoryFor(row, s);
+                if (category)
+                    secondary.append(categoryChip(category));
+                else
+                    secondary.append(div('category-chip manage-uncategorized', '未分類'));
+                const currentDisplay = merchantFor(row, s).trim();
+                const originalMerchant = row.merchant.trim();
+                if (originalMerchant && currentDisplay !== originalMerchant) {
+                    const original = div('manage-source-text', `原文：${row.merchant}`);
+                    original.title = row.merchant;
+                    secondary.append(original);
+                }
+                if (secondary.childElementCount)
+                    cell.append(secondary);
                 td.append(cell);
             }
             else
@@ -771,6 +853,7 @@ function renderManager() {
                 td.classList.add('amount-cell');
         }
         const td = document.createElement('td');
+        td.dataset.label = '操作';
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.className = 'manage-row-delete';
@@ -801,10 +884,57 @@ function fillRuleCategoryOptions() {
     select.value = categories().some(category => category.id === selected) ? selected : '';
     updateRuleCategoryVisual();
 }
+function syncRuleModeRadios() {
+    const mode = $('rule-mode').value;
+    document.querySelectorAll('input[name="rule-mode-choice"]').forEach(radio => {
+        radio.checked = radio.value === mode;
+    });
+}
+function rulePatternInputs() {
+    return Array.from($('rule-pattern-alternatives').querySelectorAll('input[data-rule-alternative]'));
+}
+function renderRulePatternAlternatives(values) {
+    const container = $('rule-pattern-alternatives');
+    container.replaceChildren();
+    for (const value of values) {
+        const row = div('rule-pattern-row');
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.maxLength = 200;
+        input.value = value;
+        input.placeholder = '追加の利用先名';
+        input.dataset.ruleAlternative = 'true';
+        input.autocomplete = 'off';
+        input.setAttribute('autocapitalize', 'off');
+        input.setAttribute('autocorrect', 'off');
+        input.spellcheck = false;
+        // Explicit 1Password opt-out: this is a merchant string, never a credential.
+        input.setAttribute('data-1p-ignore', 'true');
+        input.setAttribute('aria-label', '追加の利用先名');
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'rule-pattern-remove';
+        remove.textContent = '削除';
+        remove.setAttribute('aria-label', 'この利用先を削除');
+        remove.addEventListener('click', () => { row.remove(); $('rule-pattern-add').disabled = rulePatternInputs().length >= 19; });
+        row.append(input, remove);
+        container.append(row);
+    }
+    $('rule-pattern-add').disabled = values.length >= 19;
+}
+function addRulePatternAlternative() {
+    const existing = rulePatternInputs();
+    if (existing.length >= 19)
+        return;
+    renderRulePatternAlternatives([...existing.map(item => item.value), '']);
+    const latest = rulePatternInputs();
+    latest[latest.length - 1]?.focus();
+}
 function resetRuleEditor() {
     editingRuleId = null;
     $('rules-editor-title').textContent = '新しいルール';
     $('rules-form').reset();
+    renderRulePatternAlternatives([]);
     $('rule-card').value = '';
     $('rule-category').value = '';
     updateRuleCategoryVisual();
@@ -816,7 +946,9 @@ function populateRuleEditor(rule) {
     editingRuleId = rule.id;
     $('rules-editor-title').textContent = 'ルールの編集';
     $('rule-pattern').value = rule.pattern;
+    renderRulePatternAlternatives(rule.patterns ?? []);
     $('rule-mode').value = rule.mode;
+    syncRuleModeRadios();
     $('rule-display-name').value = rule.displayName;
     $('rule-card').value = rule.cardId ?? '';
     fillRuleCategoryOptions();
@@ -833,6 +965,7 @@ function openRuleForRow(row, s) {
     showView('rules');
     $('rule-pattern').value = row.merchant;
     $('rule-mode').value = 'exact';
+    syncRuleModeRadios();
     $('rule-display-name').value = row.merchantOverride ?? matchingRule(row.merchant, s.cardId, rules())?.displayName ?? '';
     $('rule-card').value = '';
     $('rule-category').value = matchingRule(row.merchant, s.cardId, rules())?.categoryId ?? '';
@@ -840,12 +973,16 @@ function openRuleForRow(row, s) {
     $('rule-display-name').focus();
 }
 function proposedRule() {
-    const pattern = $('rule-pattern').value;
+    const patterns = [$('rule-pattern').value, ...rulePatternInputs().map(input => input.value)].map(p => p.trim()).filter(Boolean); /* finance-v147 */
+    const pattern = patterns[0] ?? '';
+    if (patterns.length > 20 || patterns.some(p => p.length > 200) ||
+        new Set(patterns.map(normalizeMerchant)).size !== patterns.length)
+        return null;
     const displayName = $('rule-display-name').value;
     const priority = Number($('rule-priority').value);
     if (!normalizeMerchant(pattern) || !displayName.trim() || !Number.isSafeInteger(priority) || priority < 0 || priority > 1000)
         return null;
-    return { id: editingRuleId ?? 'preview-rule', pattern, mode: $('rule-mode').value,
+    return { id: editingRuleId ?? 'preview-rule', pattern, ...(patterns.length > 1 ? { patterns: patterns.slice(1) } : {}), mode: $('rule-mode').value,
         displayName, cardId: $('rule-card').value || null, enabled: $('rule-enabled').checked, priority,
         categoryId: ($('rule-category').value || null) };
 }
@@ -867,7 +1004,7 @@ function renderRules() {
         const top = div('rules-item-top'), main = div('rules-item-main');
         const heading = div('rules-item-heading');
         const name = div('rules-item-name', rule.displayName);
-        const source = div('rules-item-source', `${rule.pattern} · ${ruleModes[rule.mode]}`);
+        const source = div('rules-item-source', `${[rule.pattern, ...(rule.patterns ?? [])].join(' / ')} · ${ruleModes[rule.mode]}`);
         heading.append(name, source);
         main.append(heading);
         const card = rule.cardId ? getCard(rule.cardId)?.name ?? rule.cardId : '全カード';
@@ -1193,6 +1330,31 @@ async function ensureUnlocked() {
         return false;
     return askVault(liveVault.exists ? 'unlock' : 'create');
 }
+async function downloadManagedOriginal() {
+    const s = active();
+    const id = s ? savedIds.get(s) : undefined;
+    if (!s || !id || !liveVault?.unlocked) {
+        toast('保存済みのPDF原本を選択してください。');
+        return;
+    }
+    const button = $('manage-original-download');
+    if (button.disabled)
+        return;
+    button.disabled = true;
+    try {
+        const bytes = await liveVault.original(id);
+        if (!bytes)
+            throw new Error('この明細のPDF原本は保存されていません。');
+        downloadFile(new Uint8Array(bytes).buffer, 'application/pdf', canonicalStatementFilename(s, id));
+        toast('暗号化PDF原本を復号し、統一ファイル名でダウンロードしました。');
+    }
+    catch (error) {
+        toast(`PDF原本の取得に失敗しました：${error instanceof Error ? error.message : '不明なエラー'}`);
+    }
+    finally {
+        button.disabled = false;
+    }
+}
 async function saveEditedStatement(s, manual = false) {
     if (!savedIds.has(s))
         return;
@@ -1411,8 +1573,18 @@ function applyTheme(mode) {
 }
 function initTheme() {
     const picker = $('theme-mode');
+    const mobileToggle = document.getElementById('mobile-theme-toggle');
+    const syncIcon = () => {
+        if (!mobileToggle)
+            return;
+        const dark = document.documentElement.dataset.theme === 'dark';
+        const message = dark ? 'ライトモードに切り替える' : 'ダークモードに切り替える';
+        mobileToggle.setAttribute('aria-label', message);
+        mobileToggle.title = message;
+    };
     picker.value = getThemeMode();
     applyTheme(picker.value);
+    syncIcon();
     picker.addEventListener('change', () => {
         const value = picker.value;
         try {
@@ -1423,16 +1595,75 @@ function initTheme() {
         }
         catch { /* Storage may be unavailable in private browsing. */ }
         applyTheme(value);
+        syncIcon();
+    });
+    // On phones the icon switches explicit light/dark modes; desktop retains system mode.
+    mobileToggle?.addEventListener('click', () => {
+        picker.value = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+        picker.dispatchEvent(new Event('change'));
     });
     darkMedia.addEventListener('change', () => {
         if (picker.value === 'system')
             applyTheme('system');
+        syncIcon();
     });
 }
 function init() {
     initPasswordFields();
     initTheme();
-    assetsUi = initAssetsSettings(() => liveVault, categories, message => operationResult(message));
+    const mobileToggle = document.getElementById('mobile-nav-toggle');
+    const mobileBreakpoint = window.matchMedia('(max-width: 800px)');
+    setMobileMenuOpen(false);
+    mobileToggle?.addEventListener('click', () => {
+        setMobileMenuOpen(!document.getElementById('finance-sidebar')?.classList.contains('mobile-open'));
+    });
+    mobileBreakpoint.addEventListener('change', () => setMobileMenuOpen(false));
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && document.getElementById('finance-sidebar')?.classList.contains('mobile-open')) {
+            setMobileMenuOpen(false);
+            mobileToggle?.focus();
+        }
+    });
+    document.addEventListener('pointerdown', event => {
+        const sidebar = document.getElementById('finance-sidebar');
+        if (sidebar?.classList.contains('mobile-open') && event.target instanceof Node && !sidebar.contains(event.target))
+            setMobileMenuOpen(false);
+    });
+    futureUi = initFutureProjection(() => !liveVault?.unlocked ? null : { assets: liveVault.assetSettings(), records: liveVault.records() }, async (birthMonth) => { if (!liveVault?.unlocked)
+        throw Error('保管庫を解除してください。'); await liveVault.setBirthMonth(birthMonth); });
+    assetsUi = initAssetsSettings(() => liveVault, categories, message => {
+        operationResult(message);
+        summaryUi?.render();
+        futureUi?.render();
+    }, () => summaryUi?.render());
+    summaryUi = initMonthlySummary({
+        source: () => {
+            if (!liveVault?.unlocked)
+                return null;
+            return { records: liveVault.records(), rules: liveVault.merchantRules(),
+                categories: liveVault.merchantCategories(), assets: liveVault.assetSettings(),
+                payroll: assetsUi?.payrollSnapshot() ?? { ready: false, syncedAt: null, entries: [] } };
+        },
+        openRecord: (id) => {
+            const index = statements.findIndex(s => savedIds.get(s) === id);
+            if (index < 0) {
+                toast('該当する明細が見つかりません。OneDriveを更新してください。');
+                return;
+            }
+            const billing = statements[index]?.billingMonth;
+            manageYear = billing && /^\d{4}-(0[1-9]|1[0-2])$/.test(billing) ? billing.slice(0, 4) : 'all';
+            manageMonth = manageYear === 'all' ? 'all' : billing.slice(5);
+            activeIndex = index;
+            summaryReturnPageY = window.scrollY;
+            const content = document.querySelector('.workspace .content');
+            summaryReturnContentY = content?.scrollTop ?? 0;
+            manageReturnToSummary = true;
+            showView('manage');
+            if (content)
+                content.scrollTop = 0;
+            window.scrollTo(0, 0);
+        },
+    });
     initCloudSettings({
         onChangePassphrase: async (current, next, onProgress) => {
             if (!liveVault?.unlocked)
@@ -1444,6 +1675,7 @@ function init() {
             replaceCloudRecords(liveVault.records());
             renderRules();
             assetsUi?.render();
+            futureUi?.render();
             updateCloudStatus('OneDrive：新しい暗号化パスフレーズに更新しました。');
             operationResult('暗号化パスフレーズを変更しました。すべての有効データを新しい鍵で再暗号化しました。');
         },
@@ -1456,6 +1688,8 @@ function init() {
                 return false;
             clearRememberedKey();
             liveVault?.lock();
+            summaryUi?.reset();
+            futureUi?.reset();
             statements.splice(0);
             failedImports.splice(0);
             activeIndex = -1;
@@ -1473,21 +1707,36 @@ function init() {
         });
     }
     $('nav-import').addEventListener('click', () => showView('import'));
-    $('nav-manage').addEventListener('click', () => showView('manage'));
+    $('nav-manage').addEventListener('click', () => { manageReturnToSummary = false; showView('manage'); });
+    $('manage-back-summary').addEventListener('click', () => {
+        showView('summary');
+        const content = document.querySelector('.workspace .content');
+        if (content)
+            content.scrollTop = summaryReturnContentY;
+        window.scrollTo(0, summaryReturnPageY);
+    });
+    $('manage-original-download').addEventListener('click', () => { void downloadManagedOriginal(); });
+    $('nav-summary').addEventListener('click', () => showView('summary'));
     $('nav-rules').addEventListener('click', () => showView('rules'));
     $('nav-assets').addEventListener('click', () => showView('assets'));
+    $('nav-future').addEventListener('click', () => showView('future'));
     $('nav-settings').addEventListener('click', () => showView('settings'));
-    $('manage-filter-year').addEventListener('change', event => {
-        manageYear = event.target.value;
+    for (const [key, id] of [['usedOn', 'manage-sort-date'], ['amount', 'manage-sort-amount']]) {
+        $(id).addEventListener('click', () => {
+            manageSort = { key, direction: manageSort?.key === key && manageSort.direction === 'asc' ? 'desc' : 'asc' };
+            renderManager();
+        });
+    }
+    $('manage-prev-month').addEventListener('click', () => manageShiftMonth(-1));
+    $('manage-next-month').addEventListener('click', () => manageShiftMonth(1));
+    $('manage-current-month').addEventListener('click', () => manageChangePeriod(`${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`));
+    $('manage-show-all').addEventListener('click', () => {
+        manageYear = 'all';
         manageMonth = 'all';
         selectVisibleManagerStatement();
-        render();
+        renderManager();
     });
-    $('manage-filter-month').addEventListener('change', event => {
-        manageMonth = event.target.value;
-        selectVisibleManagerStatement();
-        render();
-    });
+    $('manage-period').addEventListener('change', event => manageChangePeriod(event.target.value));
     for (const card of CARDS) {
         const opt = document.createElement('option');
         opt.value = card.id;
@@ -1517,6 +1766,11 @@ function init() {
     $('recent-merchants-search').addEventListener('input', renderRecentMerchants);
     $('rule-category').addEventListener('change', updateRuleCategoryVisual);
     $('rule-reset').addEventListener('click', resetRuleEditor);
+    document.querySelectorAll('input[name="rule-mode-choice"]').forEach(radio => radio.addEventListener('change', () => {
+        if (radio.checked)
+            $('rule-mode').value = radio.value;
+    }));
+    $('rule-pattern-add').addEventListener('click', addRulePatternAlternative);
     $('rules-form').addEventListener('submit', event => {
         event.preventDefault();
         const candidate = proposedRule();
@@ -1566,8 +1820,6 @@ function init() {
     } markDirty(s); });
     $('manage-payment').addEventListener('change', e => { const s = active(); if (!s)
         return; const val = e.target.value.trim().replace(/\//g, '-'); s.paymentDate = val || null; markDirty(s); });
-    $('manage-total').addEventListener('change', e => { const s = active(); if (!s)
-        return; const val = e.target.value.trim().replace(/,/g, ''); s.statedTotal = /^-?\d+$/.test(val) ? Number(val) : null; markDirty(s); });
     $('file-input').addEventListener('change', event => {
         const input = event.target;
         if (input.files)
@@ -1690,6 +1942,7 @@ function init() {
                 appendCloudRecordsKeepingDrafts(liveVault.records());
                 renderRules();
                 assetsUi?.render();
+                futureUi?.render();
                 void assetsUi?.refreshPayroll();
                 updateCloudStatus();
                 await refreshVaultControls();

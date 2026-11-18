@@ -1,10 +1,33 @@
+import { CARDS } from '../models/types.js';
 /** Finance assets settings are independent from statements and merchant rules.
  * Snapshots are confirmed balances, not reconstructed transactions. */
 export const ASSET_ACCOUNTS = [
     { id: 'rakuten-bank', name: '楽天銀行', detail: '生活費・カード引落など', icon: '🏦' },
+    { id: 'mizuho-bank', name: 'みずほ銀行', detail: 'みずほ楽天カードの引落', icon: '🏛️' },
     { id: 'cash-savings', name: '現金貯金専用口座', detail: '楽天銀行から定期送金', icon: '🐖' },
     { id: 'nisa', name: 'NISA口座', detail: '積立投資の評価額', icon: '🌱' },
 ];
+export function oneTimeAccountDelta(entry, accountId) {
+    return (entry.toAccountId === accountId ? entry.amount : 0) - (entry.fromAccountId === accountId ? entry.amount : 0);
+}
+/** A dated manual entry can confirm or replace an otherwise duplicate schedule. */
+export function recurringCoveredByOneTime(occurrence, day, entries = []) {
+    const name = occurrence.name.normalize('NFKC').trim().toLocaleLowerCase();
+    return entries.some(entry => entry.date === day && entry.kind === occurrence.kind &&
+        entry.amount === occurrence.amount && entry.fromAccountId === occurrence.fromAccountId &&
+        entry.toAccountId === occurrence.toAccountId && entry.name.normalize('NFKC').trim().toLocaleLowerCase() === name);
+}
+export const DEFAULT_MIZUHO_PLAN = { enabled: false, leadDays: 3, extraForSmallBills: true };
+export function validateMizuhoPlan(value) {
+    if (value === undefined || value === null)
+        return undefined;
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        throw new Error('みずほ送金予測の設定が不正です。');
+    const v = value;
+    if (typeof v.enabled !== 'boolean' || !Number.isSafeInteger(v.leadDays) || v.leadDays < 0 || v.leadDays > 20 || typeof v.extraForSmallBills !== 'boolean')
+        throw new Error('みずほ送金予測の設定が不正です。');
+    return { enabled: v.enabled, leadDays: v.leadDays, extraForSmallBills: v.extraForSmallBills };
+}
 export function emptyAssets() {
     return { format: 'finance-assets-v1', snapshots: [], recurring: [], deletedSnapshots: [], deletedRecurring: [], conflicts: [], nisaCardRule: null, payrollDepositAccount: null, payrollAutoPassphrase: null };
 }
@@ -28,6 +51,27 @@ export function validateSnapshot(raw) {
         !Number.isFinite(Date.parse(raw.observedAt)) || !/(Z|[+-]\d{2}:\d{2})$/.test(raw.observedAt))
         throw new Error('口座残高の記録が不正です。金額と確認日時を確認してください。');
     return { id: raw.id, accountId: raw.accountId, balance: raw.balance, observedAt: new Date(raw.observedAt).toISOString() };
+}
+export function validateOneTime(raw) {
+    if (!raw || typeof raw !== 'object' || (typeof raw.id !== 'string' || !idPattern.test(raw.id)) || !validateDate(raw.date) ||
+        typeof raw.name !== 'string' || !raw.name.trim() || raw.name.trim().length > 80 ||
+        !Number.isSafeInteger(raw.amount) || raw.amount <= 0 ||
+        !['expense', 'income', 'transfer', 'withdrawal'].includes(raw.kind) ||
+        !['done', 'planned'].includes(raw.status) ||
+        (raw.fromAccountId !== null && !checkAccount(raw.fromAccountId)) ||
+        (raw.toAccountId !== null && !checkAccount(raw.toAccountId)))
+        throw new Error('単発の入出金を確認してください。');
+    if (raw.kind === 'income' && (!checkAccount(raw.toAccountId) || raw.fromAccountId !== null))
+        throw new Error('入金先口座を指定してください。');
+    if ((raw.kind === 'expense' || raw.kind === 'withdrawal') && (!checkAccount(raw.fromAccountId) || raw.toAccountId !== null))
+        throw new Error('出金元口座を指定してください。');
+    if (raw.kind === 'transfer' && (!checkAccount(raw.fromAccountId) || !checkAccount(raw.toAccountId) || raw.fromAccountId === raw.toAccountId))
+        throw new Error('振替元と振替先を別々に指定してください。');
+    if (raw.cardFunding !== undefined && typeof raw.cardFunding !== 'boolean')
+        throw new Error('カード送金の区別が不正です。');
+    if (raw.cardFunding && !(raw.kind === 'transfer' && raw.fromAccountId === 'rakuten-bank' && raw.toAccountId === 'mizuho-bank'))
+        throw new Error('カード代金送金は楽天銀行からみずほ銀行への振替だけ指定できます。');
+    return { ...raw, name: raw.name.trim() };
 }
 export function validateRecurring(raw) {
     if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || !idPattern.test(raw.id) ||
@@ -86,6 +130,27 @@ export function validatePayrollAutoPassphrase(raw) {
         throw new Error('Payrollの自動連携用パスフレーズの形式が不正です。');
     return raw;
 }
+export function validateBirthMonth(value) {
+    if (value === undefined || value === null || value === '')
+        return undefined;
+    if (typeof value !== 'string' || !/^(19|20|21)\d{2}-(0[1-9]|1[0-2])$/.test(value))
+        throw new Error('生年月を確認してください。');
+    return value;
+}
+export function validateCardDebitAccounts(value) {
+    if (value === undefined || value === null)
+        return undefined;
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        throw new Error('カード引落口座の設定が不正です。');
+    const allowed = new Set(CARDS.map(c => c.id));
+    const result = {};
+    for (const [id, account] of Object.entries(value)) {
+        if (!allowed.has(id) || !checkAccount(account) || account === 'nisa')
+            throw new Error('カード引落口座の設定が不正です。');
+        result[id] = account;
+    }
+    return result;
+}
 export function validateAssets(raw) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw))
         throw new Error('資産設定の暗号データが不正です。');
@@ -95,7 +160,12 @@ export function validateAssets(raw) {
         doc.snapshots.length > 1000 || doc.recurring.length > 300 || doc.deletedSnapshots.length > 2500 || doc.deletedRecurring.length > 2500 || doc.conflicts.length > 300)
         throw new Error('資産設定の形式または件数が不正です。');
     const snapshots = doc.snapshots.map(validateSnapshot), recurring = doc.recurring.map(validateRecurring);
-    for (const list of [snapshots, recurring]) {
+    if (doc.oneTime !== undefined && (!Array.isArray(doc.oneTime) || doc.oneTime.length > 3000))
+        throw new Error('単発の入出金件数が不正です。');
+    if (doc.deletedOneTime !== undefined && (!Array.isArray(doc.deletedOneTime) || doc.deletedOneTime.length > 5000))
+        throw new Error('単発の削除履歴が不正です。');
+    const oneTime = (doc.oneTime ?? []).map(validateOneTime);
+    for (const list of [snapshots, recurring, oneTime]) {
         const ids = new Set();
         for (const item of list) {
             if (ids.has(item.id))
@@ -109,12 +179,17 @@ export function validateAssets(raw) {
         return [...new Set(ids)];
     };
     const deletedSnapshots = checkDeleted(doc.deletedSnapshots), deletedRecurring = checkDeleted(doc.deletedRecurring);
-    if (snapshots.some(s => deletedSnapshots.includes(s.id)) || recurring.some(s => deletedRecurring.includes(s.id)))
+    const deletedOneTime = checkDeleted(doc.deletedOneTime ?? []);
+    if (snapshots.some(s => deletedSnapshots.includes(s.id)) || recurring.some(s => deletedRecurring.includes(s.id)) || oneTime.some(s => deletedOneTime.includes(s.id)))
         throw new Error('削除済み設定と有効な設定が重複しています。');
     if (doc.conflicts.some(c => !c || typeof c.itemId !== 'string' || !idPattern.test(c.itemId) || typeof c.field !== 'string' || c.field.length > 50 || typeof c.at !== 'string' || !Number.isFinite(Date.parse(c.at))))
         throw new Error('資産設定の競合履歴が不正です。');
     return { format: 'finance-assets-v1', snapshots, recurring, deletedSnapshots, deletedRecurring, conflicts: clone(doc.conflicts), nisaCardRule: validateNisaCardRule(doc.nisaCardRule), payrollDepositAccount: validatePayrollDepositAccount(doc.payrollDepositAccount),
-        payrollAutoPassphrase: validatePayrollAutoPassphrase(doc.payrollAutoPassphrase) };
+        ...(validateMizuhoPlan(doc.mizuhoTransferPlan) ? { mizuhoTransferPlan: validateMizuhoPlan(doc.mizuhoTransferPlan) } : {}),
+        payrollAutoPassphrase: validatePayrollAutoPassphrase(doc.payrollAutoPassphrase),
+        ...(validateBirthMonth(doc.birthMonth) ? { birthMonth: validateBirthMonth(doc.birthMonth) } : {}),
+        ...(doc.cardDebitAccounts !== undefined ? { cardDebitAccounts: validateCardDebitAccounts(doc.cardDebitAccounts) } : {}),
+        ...(doc.oneTime !== undefined ? { oneTime } : {}), ...(doc.deletedOneTime !== undefined ? { deletedOneTime } : {}) };
 }
 export function latestBalance(doc, account, asOf) {
     const found = doc.snapshots.filter(s => s.accountId === account && (!asOf || s.observedAt <= asOf));
@@ -188,6 +263,7 @@ export function mergeAssets(base, local, remote, now = new Date().toISOString())
     };
     const snapshots = mergeGroup(base.snapshots, local.snapshots, remote.snapshots, base.deletedSnapshots, local.deletedSnapshots, remote.deletedSnapshots, ['accountId', 'balance', 'observedAt']);
     const recurring = mergeGroup(base.recurring, local.recurring, remote.recurring, base.deletedRecurring, local.deletedRecurring, remote.deletedRecurring, ['name', 'amount', 'kind', 'fromAccountId', 'toAccountId', 'frequency', 'dayOfMonth', 'monthOfYear', 'weekday', 'startOn', 'endOn', 'categoryId', 'enabled']);
+    const oneTimes = mergeGroup(base.oneTime ?? [], local.oneTime ?? [], remote.oneTime ?? [], base.deletedOneTime ?? [], local.deletedOneTime ?? [], remote.deletedOneTime ?? [], ['date', 'name', 'amount', 'kind', 'status', 'fromAccountId', 'toAccountId', 'cardFunding']);
     const baseline = base.nisaCardRule ?? null, left = local.nisaCardRule ?? null, right = remote.nisaCardRule ?? null;
     let nisaCardRule;
     if (same(left, baseline))
@@ -221,6 +297,25 @@ export function mergeAssets(base, local, remote, now = new Date().toISOString())
         // Never put either old or new credential into the permanent conflict log.
         conflicts.push({ itemId: 'payroll-auto-credential', field: 'payrollAutoPassphrase', discarded: '競合', chosen: '保存端末側を優先', at: now });
     }
+    const bBirth = base.birthMonth, lBirth = local.birthMonth, rBirth = remote.birthMonth;
+    const birthMonth = same(lBirth, bBirth) ? rBirth : lBirth;
+    if (!same(lBirth, bBirth) && !same(rBirth, bBirth) && !same(lBirth, rBirth))
+        conflicts.push({ itemId: 'birth-month', field: 'birthMonth', discarded: rBirth ?? null, chosen: lBirth ?? null, at: now });
+    const accounts = {};
+    for (const id of new Set([...Object.keys(base.cardDebitAccounts ?? {}), ...Object.keys(local.cardDebitAccounts ?? {}), ...Object.keys(remote.cardDebitAccounts ?? {})])) {
+        const original = base.cardDebitAccounts?.[id], left = local.cardDebitAccounts?.[id], right = remote.cardDebitAccounts?.[id];
+        const next = same(left, original) ? right : left;
+        if (next)
+            accounts[id] = next;
+        if (!same(left, original) && !same(right, original) && !same(left, right))
+            conflicts.push({ itemId: 'card-debit-accounts', field: id, discarded: right ?? null, chosen: left ?? null, at: now });
+    }
+    const bPlan = base.mizuhoTransferPlan, lPlan = local.mizuhoTransferPlan, rPlan = remote.mizuhoTransferPlan;
+    const plan = same(lPlan, bPlan) ? rPlan : lPlan;
+    if (!same(lPlan, bPlan) && !same(rPlan, bPlan) && !same(lPlan, rPlan))
+        conflicts.push({ itemId: 'mizuho-transfer-plan', field: 'mizuhoTransferPlan', discarded: rPlan ?? null, chosen: lPlan ?? null, at: now });
     return validateAssets({ format: 'finance-assets-v1', snapshots: snapshots.entries, recurring: recurring.entries,
-        deletedSnapshots: snapshots.deleted, deletedRecurring: recurring.deleted, conflicts: conflicts.slice(-200), nisaCardRule, payrollDepositAccount, payrollAutoPassphrase });
+        deletedSnapshots: snapshots.deleted, deletedRecurring: recurring.deleted, conflicts: conflicts.slice(-200), nisaCardRule, payrollDepositAccount, payrollAutoPassphrase,
+        ...(birthMonth ? { birthMonth } : {}), ...(Object.keys(accounts).length ? { cardDebitAccounts: accounts } : {}), ...(plan ? { mizuhoTransferPlan: plan } : {}), ...(base.oneTime !== undefined || local.oneTime !== undefined || remote.oneTime !== undefined ? { oneTime: oneTimes.entries } : {}),
+        ...(base.deletedOneTime !== undefined || local.deletedOneTime !== undefined || remote.deletedOneTime !== undefined ? { deletedOneTime: oneTimes.deleted } : {}) });
 }

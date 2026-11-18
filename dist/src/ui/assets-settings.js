@@ -1,6 +1,9 @@
-import { ASSET_ACCOUNTS, latestBalance, validateRecurring, validateSnapshot, validateNisaCardRule } from '../cloud/assets.js';
+import { ASSET_ACCOUNTS, latestBalance, validateRecurring, validateSnapshot, validateNisaCardRule, validateOneTime } from '../cloud/assets.js';
 import { CARDS } from '../models/types.js';
-import { forecastAssets, lastDayOfNextMonth, localDay, matchingNisaRows } from '../cloud/asset-projection.js';
+import { lastDayOfNextMonth, localDay, matchingNisaRows } from '../cloud/asset-projection.js';
+import { forecastBankBalances } from '../cloud/salary-projection.js';
+import { estimateMizuhoTransferAmount } from '../cloud/mizuho-transfer.js';
+import { DEFAULT_MIZUHO_PLAN } from '../cloud/assets.js'; /* finance-v148 */
 import { PayrollReadSession } from '../cloud/payroll-bridge.js';
 import { incomeByMonth } from '../cloud/payroll-income.js';
 const $ = (id) => {
@@ -15,10 +18,6 @@ const localDate = (date = new Date()) => {
     const adjusted = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
     return adjusted.toISOString().slice(0, 10);
 };
-const localDateTime = (date = new Date()) => {
-    const adjusted = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
-    return adjusted.toISOString().slice(0, 16);
-};
 function make(tag, className, content) {
     const node = document.createElement(tag);
     if (className)
@@ -27,9 +26,21 @@ function make(tag, className, content) {
         node.textContent = content;
     return node;
 }
+const assetStatusTimers = new WeakMap(); /* finance-settings-v144 */
 function status(node, message, error = false) {
+    const old = assetStatusTimers.get(node);
+    if (old)
+        clearTimeout(old);
+    assetStatusTimers.delete(node);
     node.textContent = message;
     node.classList.toggle('bad', error);
+    // Informational/finished actions disappear; errors and important warnings remain.
+    if (!error && /保存しました|取得しました|削除しました|解除しました|更新しました|完了しました/.test(message)
+        && !/二重計上|注意|失敗/.test(message)) {
+        const timer = setTimeout(() => { if (node.textContent === message)
+            node.textContent = ''; assetStatusTimers.delete(node); }, 5000);
+        assetStatusTimers.set(node, timer);
+    }
 }
 function addButton(label, handler, remove = false) {
     const button = document.createElement('button');
@@ -47,17 +58,19 @@ function frequencyLabel(e) {
     const day = e.dayOfMonth === 0 ? '末日' : `${e.dayOfMonth}日`;
     return e.frequency === 'monthly' ? `毎月${day}` : `毎年${e.monthOfYear}月${day}`;
 }
-export function initAssetsSettings(getVault, getCategories, onSaved) {
+export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollChange = () => { }) {
     let busy = false, dirty = false, nisaDirty = false, editingId = null;
     let payrollSession = null;
     let payrollIncome = [];
     let payrollSynced = false, payrollBusy = false, payrollAccountDirty = false;
     let payrollSyncedAt = 0, lastPayrollAttemptAt = 0;
     let payrollOwner = null;
-    const dates = new Map();
     const amounts = new Map();
     const latestTexts = new Map();
     const histories = new Map();
+    const accountDetails = new Map();
+    let cardDebitAccountsDirty = false;
+    let onceEditingId = null, onceDirty = false, onceShowAll = false;
     const editing = () => !!editingId;
     const value = (id) => $(id).value;
     const choices = (select, options) => {
@@ -152,7 +165,6 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
         if (busy)
             return;
         const node = $('assets-balances-status');
-        // Empty accounts are intentionally skipped; the user may update just one of three.
         const entered = ASSET_ACCOUNTS.filter(account => amounts.get(account.id).value.trim() !== '');
         if (!entered.length) {
             status(node, '保存する口座の残高を入力してください。', true);
@@ -160,30 +172,22 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
         }
         const pending = [];
         try {
+            // All accounts in one save share the click-time confirmation timestamp.
+            const confirmationTime = new Date().toISOString(); /* finance-v145 */
             for (const account of entered) {
-                const amount = amounts.get(account.id), date = dates.get(account.id);
-                if (!date.value)
-                    throw new Error(`${account.name}：確認日時を入力してください。`);
-                const moment = new Date(date.value);
-                if (!Number.isFinite(moment.getTime()))
-                    throw new Error(`${account.name}：日時が不正です。`);
-                if (moment.getTime() > Date.now() + 60000)
-                    throw new Error(`${account.name}：未来の確認日時は登録できません。`);
-                const snapshot = validateSnapshot({ id: crypto.randomUUID(), accountId: account.id, balance: Number(amount.value), observedAt: moment.toISOString() });
-                pending.push({ accountId: account.id, amount: amount.value, date: date.value, snapshot });
+                const amount = amounts.get(account.id);
+                const snapshot = validateSnapshot({ id: crypto.randomUUID(), accountId: account.id, balance: Number(amount.value), observedAt: confirmationTime });
+                pending.push({ accountId: account.id, amount: amount.value, snapshot });
             }
             toggleBusy(true);
-            status(node, `${pending.length}口座の残高をOneDriveに保存しています…`);
+            status(node, `${pending.length}口座の残高を保存中…`);
             await requireVault().addBalanceSnapshots(pending.map(item => item.snapshot));
-            // Do not discard edits made while the asynchronous save was in flight.
             for (const item of pending) {
-                const amount = amounts.get(item.accountId), date = dates.get(item.accountId);
-                if (amount.value === item.amount && date.value === item.date) {
+                const amount = amounts.get(item.accountId);
+                if (amount.value === item.amount)
                     amount.value = '';
-                    date.value = localDateTime();
-                }
             }
-            status(node, `${pending.length}口座の残高をOneDriveに保存しました。`);
+            status(node, `${pending.length}口座の残高を保存しました。`);
             onSaved(`${pending.length}口座の残高を保存しました。`);
             render();
         }
@@ -213,6 +217,165 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
             toggleBusy(false);
         }
     }
+    const onceKinds = { expense: '支出', income: '入金', transfer: '振替', withdrawal: '現金引出' };
+    const onceDialog = $('assets-once-dialog');
+    let previousBodyPosition = '';
+    let previousBodyTop = '';
+    let previousBodyWidth = '';
+    let previousBodyOverflow = '';
+    let modalScrollY = 0;
+    function lockOncePage() {
+        // Fixed-body scroll lock also works in iOS Safari while the dialog itself scrolls.
+        if (document.documentElement.classList.contains('assets-once-page-locked'))
+            return;
+        modalScrollY = window.scrollY;
+        previousBodyPosition = document.body.style.position;
+        previousBodyTop = document.body.style.top;
+        previousBodyWidth = document.body.style.width;
+        previousBodyOverflow = document.body.style.overflow;
+        document.documentElement.classList.add('assets-once-page-locked');
+        document.body.style.position = 'fixed';
+        document.body.style.top = `-${modalScrollY}px`;
+        document.body.style.width = '100%';
+        document.body.style.overflow = 'hidden';
+    }
+    function unlockOncePage() {
+        if (!document.documentElement.classList.contains('assets-once-page-locked'))
+            return;
+        document.documentElement.classList.remove('assets-once-page-locked');
+        document.body.style.position = previousBodyPosition;
+        document.body.style.top = previousBodyTop;
+        document.body.style.width = previousBodyWidth;
+        document.body.style.overflow = previousBodyOverflow;
+        window.scrollTo(0, modalScrollY);
+    }
+    onceDialog.addEventListener('close', unlockOncePage);
+    const onceKind = () => (document.querySelector('input[name="assets-once-kind"]:checked')?.value ?? 'transfer');
+    const onceStatus = () => (document.querySelector('input[name="assets-once-status"]:checked')?.value ?? 'done');
+    function onceFormFields() {
+        const kind = onceKind(), from = value('assets-once-from'), to = value('assets-once-to');
+        $('assets-once-from-wrap').classList.toggle('hidden', kind === 'income');
+        $('assets-once-to-wrap').classList.toggle('hidden', kind === 'expense' || kind === 'withdrawal');
+        const label = $('assets-once-to-wrap');
+        if (kind === 'income')
+            label.firstChild.textContent = '入金先口座';
+        else
+            label.firstChild.textContent = '振替先口座';
+        const funding = kind === 'transfer' && from === 'rakuten-bank' && to === 'mizuho-bank';
+        $('assets-once-funding-wrap').classList.toggle('hidden', !funding);
+        if (!funding)
+            $('assets-once-funding').checked = false;
+    }
+    function resetOnceForm() {
+        onceEditingId = null;
+        onceDirty = false;
+        $('assets-once-form').reset();
+        $('assets-once-date').value = localDate();
+        $('assets-once-from').value = 'rakuten-bank';
+        $('assets-once-to').value = 'cash-savings';
+        $('assets-once-funding').checked = false;
+        $('assets-once-dialog-title').textContent = '入出金を登録';
+        $('assets-once-save').textContent = 'OneDriveに保存';
+        status($('assets-once-error'), '');
+        onceFormFields();
+    }
+    function openOnce(entry) {
+        if (busy || !getVault()?.unlocked)
+            return;
+        resetOnceForm();
+        if (entry) {
+            onceEditingId = entry.id;
+            $('assets-once-date').value = entry.date;
+            $('assets-once-name').value = entry.name;
+            $('assets-once-amount').value = String(entry.amount);
+            $('assets-once-from').value = entry.fromAccountId ?? 'rakuten-bank';
+            $('assets-once-to').value = entry.toAccountId ?? 'cash-savings';
+            $('assets-once-funding').checked = !!entry.cardFunding;
+            $('assets-once-form').querySelector(`input[name="assets-once-kind"][value="${entry.kind}"]`).checked = true;
+            $('assets-once-form').querySelector(`input[name="assets-once-status"][value="${entry.status}"]`).checked = true;
+            $('assets-once-dialog-title').textContent = '入出金を編集';
+            $('assets-once-save').textContent = '変更を保存';
+            onceFormFields();
+            onceDirty = false;
+        }
+        onceDialog.showModal();
+        lockOncePage();
+    }
+    function closeOnce() { if (busy)
+        return; onceDialog.close(); resetOnceForm(); }
+    function readOnce() {
+        const kind = onceKind(), from = value('assets-once-from'), to = value('assets-once-to');
+        return validateOneTime({ id: onceEditingId ?? crypto.randomUUID(), date: value('assets-once-date'),
+            name: value('assets-once-name'), amount: Number(value('assets-once-amount')), kind, status: onceStatus(),
+            fromAccountId: kind === 'income' ? null : from, toAccountId: kind === 'transfer' || kind === 'income' ? to : null,
+            ...(kind === 'transfer' && from === 'rakuten-bank' && to === 'mizuho-bank' && $('assets-once-funding').checked ? { cardFunding: true } : {}) });
+    }
+    function renderOnce() {
+        const data = getVault()?.unlocked ? getVault().assetSettings() : null;
+        const list = $('assets-once-list');
+        list.replaceChildren();
+        if (!data)
+            return;
+        const entries = [...(data.oneTime ?? [])].sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
+        $('assets-once-count').textContent = `${entries.length}件`;
+        if (!entries.length)
+            list.append(make('p', 'assets-once-empty', 'まだ入出金の記録はありません。'));
+        for (const entry of (onceShowAll ? entries : entries.slice(0, 6))) {
+            const row = make('div', 'assets-once-item'), detail = make('div', 'assets-once-item-detail');
+            detail.append(make('strong', '', entry.name));
+            const from = accountName(entry.fromAccountId), to = accountName(entry.toAccountId);
+            const route = entry.kind === 'transfer' ? `${from} → ${to}` : entry.kind === 'income' ? to : from;
+            detail.append(make('small', '', `${entry.date.replace(/-/g, '/')} · ${onceKinds[entry.kind]} · ${route} · ${entry.status === 'done' ? '実行済み' : '予定'}`));
+            const right = make('div', 'assets-once-item-action');
+            right.append(make('b', '', `${entry.kind === 'income' ? '+' : entry.kind === 'expense' || entry.kind === 'withdrawal' ? '−' : ''}${yen(entry.amount)}`), addButton('編集', () => openOnce(entry)), addButton('削除', () => { void deleteOnce(entry.id); }, true));
+            row.append(detail, right);
+            list.append(row);
+        }
+        const more = $('assets-once-toggle');
+        more.classList.toggle('hidden', entries.length <= 6);
+        more.textContent = onceShowAll ? '閉じる' : `すべて表示（${entries.length}件）`;
+    }
+    async function saveOnce() {
+        if (busy)
+            return;
+        const node = $('assets-once-error');
+        try {
+            const entry = readOnce();
+            toggleBusy(true);
+            await requireVault().upsertOneTime(entry);
+            onceDirty = false;
+            onceDialog.close();
+            resetOnceForm();
+            status($('assets-once-status'), '入出金を保存しました。');
+            onSaved('入出金をOneDriveに保存しました。');
+            render();
+            onPayrollChange();
+        }
+        catch (error) {
+            status(node, `保存できませんでした：${error instanceof Error ? error.message : '通信エラー'}`, true);
+        }
+        finally {
+            toggleBusy(false);
+        }
+    }
+    async function deleteOnce(id) {
+        if (busy || !window.confirm('この入出金記録を削除しますか？'))
+            return;
+        toggleBusy(true);
+        try {
+            await requireVault().deleteOneTime(id);
+            status($('assets-once-status'), '入出金を削除しました。');
+            onSaved('入出金記録を削除しました。');
+            render();
+            onPayrollChange();
+        }
+        catch (error) {
+            status($('assets-once-status'), `削除できませんでした：${error instanceof Error ? error.message : '通信エラー'}`, true);
+        }
+        finally {
+            toggleBusy(false);
+        }
+    }
     function renderAccounts() {
         const vault = getVault();
         if (!vault?.unlocked)
@@ -220,7 +383,8 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
         const data = vault.assetSettings(), records = vault.records();
         const today = new Date();
         const available = payrollSynced ? payrollIncome : [];
-        const now = forecastAssets(data, localDay(today), records, available, data.payrollDepositAccount), next = forecastAssets(data, lastDayOfNextMonth(today), records, available, data.payrollDepositAccount);
+        const currentReport = forecastBankBalances(data, localDay(today), records, available, data.payrollDepositAccount, localDay(today)), nextReport = forecastBankBalances(data, lastDayOfNextMonth(today), records, available, data.payrollDepositAccount, localDay(today));
+        const now = currentReport.accounts, next = nextReport.accounts;
         for (const account of ASSET_ACCOUNTS) {
             const latest = latestBalance(data, account.id), current = now[account.id], upcoming = next[account.id];
             const label = latestTexts.get(account.id);
@@ -231,19 +395,38 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
                 const parts = [];
                 if (current.recurringDelta)
                     parts.push(`定期入出金 ${current.recurringDelta > 0 ? '+' : ''}${yen(current.recurringDelta)}`);
+                if (current.oneTimeDelta)
+                    parts.push(`単発入出金 ${current.oneTimeDelta > 0 ? '+' : ''}${yen(current.oneTimeDelta)}`);
                 if (current.cardNisaDelta)
                     parts.push(`カード積立 +${yen(current.cardNisaDelta)}`);
                 if (current.payrollDelta)
                     parts.push(`Payroll給与 +${yen(current.payrollDelta)}`);
-                label.append(make('small', 'assets-balance-breakdown', parts.length ? parts.join(' / ') : '確認後の入出金予定なし'));
+                const cardDebits = currentReport.cardDebitByAccount[account.id] ?? 0;
+                if (cardDebits)
+                    parts.push(`カード引落 −${yen(cardDebits)}`);
+                const autoTransfer = currentReport.autoTransferByAccount[account.id] ?? 0;
+                if (autoTransfer)
+                    parts.push(`みずほ送金予測 ${autoTransfer > 0 ? '+' : ''}${yen(autoTransfer)}`);
+                // Shared detail panel below all three accounts, not uneven paragraphs in each card.
+                label.append(make('div', 'assets-balance-future', `来月末の予測：${upcoming.balance === null ? '未取得' : yen(upcoming.balance)}`));
+                const details = accountDetails.get(account.id);
+                details.replaceChildren();
+                if (parts.length)
+                    details.append(make('p', '', parts.join(' / ')));
                 if (current.warning)
-                    label.append(make('small', 'assets-balance-hint', current.warning));
+                    details.append(make('p', '', current.warning));
                 if (data.payrollDepositAccount === account.id && !payrollSynced)
-                    label.append(make('small', 'assets-balance-hint', '給与は未同期です。表示残高にはPayroll収入が含まれません。'));
-                label.append(make('div', 'assets-balance-future', `来月末の参考予測：${upcoming.balance === null ? '計算できません' : yen(upcoming.balance)}`));
+                    details.append(make('p', '', 'Payrollの給与は未取得です。'));
+                const expected = nextReport.estimatedByAccount[account.id] ?? 0;
+                if (expected)
+                    details.append(make('p', '', `給与見込み +${yen(expected)}`));
+                if (account.id === 'rakuten-bank' && !data.payrollDepositAccount)
+                    details.append(make('p', '', '給与の振込先は「設定」で登録できます。'));
+                if (!details.childElementCount)
+                    details.append(make('p', '', '入出金の変動なし'));
             }
             else
-                label.append(make('small', 'assets-balance-date', 'まず残高と確認日時を登録してください。'));
+                label.append(make('small', 'assets-balance-date', 'まず残高を登録してください。'));
             const history = histories.get(account.id);
             history.replaceChildren();
             const items = data.snapshots.filter(x => x.accountId === account.id).sort((a, b) => b.observedAt.localeCompare(a.observedAt) || b.id.localeCompare(a.id));
@@ -259,7 +442,103 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
                 history.append(make('p', 'assets-help', `直近12件を表示（全${items.length}件）`));
             const count = document.getElementById(`assets-history-count-${account.id}`);
             if (count)
-                count.textContent = String(items.length);
+                count.textContent = `（${items.length}件）`;
+        }
+    }
+    function renderCardDebitAccounts() {
+        const vault = getVault();
+        if (!vault?.unlocked)
+            return;
+        const container = $('assets-card-debits-list');
+        const saved = vault.assetSettings().cardDebitAccounts ?? {};
+        const selected = new Map();
+        if (cardDebitAccountsDirty)
+            for (const field of container.querySelectorAll('input[type="radio"]:checked'))
+                selected.set(field.dataset.cardId, field.value);
+        container.replaceChildren();
+        for (const card of CARDS) {
+            const box = make('fieldset', 'assets-card-debits-item');
+            box.append(make('legend', '', card.name));
+            const radioGroup = make('div', 'assets-debit-radio-row');
+            const value = selected.get(card.id) ?? saved[card.id] ?? '';
+            for (const [id, title] of [['', '未設定'], ['rakuten-bank', '楽天'], ['mizuho-bank', 'みずほ'], ['cash-savings', '貯金口座']]) {
+                const label = make('label', 'assets-debit-radio');
+                const input = document.createElement('input');
+                input.type = 'radio';
+                input.name = `card-debit-${card.id}`;
+                input.dataset.cardId = card.id;
+                input.value = id;
+                input.checked = id === value;
+                input.addEventListener('change', () => { cardDebitAccountsDirty = true; });
+                label.append(input, document.createTextNode(title));
+                radioGroup.append(label);
+            }
+            box.append(radioGroup);
+            container.append(box);
+        }
+    }
+    async function saveCardDebitAccounts() {
+        if (busy)
+            return;
+        const values = {};
+        for (const field of $('assets-card-debits-list').querySelectorAll('input[type="radio"]:checked')) {
+            if (['rakuten-bank', 'mizuho-bank', 'cash-savings'].includes(field.value))
+                values[field.dataset.cardId] = field.value;
+        }
+        if (requireVault().assetSettings().mizuhoTransferPlan?.enabled && values['rakuten-mizuho'] !== 'mizuho-bank') {
+            status($('assets-card-debits-status'), '送金予測が有効です。みずほ楽天カードは「みずほ」を選んでください。', true);
+            return;
+        }
+        const node = $('assets-card-debits-status');
+        toggleBusy(true);
+        status(node, '保存中…');
+        try {
+            await requireVault().setCardDebitAccounts(values);
+            cardDebitAccountsDirty = false;
+            status(node, '保存しました。');
+            onSaved('カードの引落口座を保存しました。');
+            render();
+        }
+        catch (err) {
+            status(node, `保存失敗：${err instanceof Error ? err.message : '通信エラー'}`, true);
+        }
+        finally {
+            toggleBusy(false);
+        }
+    }
+    function renderMizuhoPlan() {
+        const vault = getVault();
+        if (!vault?.unlocked)
+            return;
+        const plan = vault.assetSettings().mizuhoTransferPlan ?? DEFAULT_MIZUHO_PLAN;
+        $('mizuho-plan-enabled').checked = plan.enabled;
+        $('mizuho-plan-lead').value = String(plan.leadDays);
+        $('mizuho-plan-extra').checked = plan.extraForSmallBills;
+        const update = () => {
+            const extra = $('mizuho-plan-extra').checked;
+            $('mizuho-plan-example').textContent = `例：24,245円 → ${yen(estimateMizuhoTransferAmount(24245, extra))}、160,500円 → ${yen(estimateMizuhoTransferAmount(160500, extra))}（請求額から自動試算）`;
+        };
+        update();
+    }
+    async function saveMizuhoPlan() {
+        if (busy)
+            return;
+        const plan = { enabled: $('mizuho-plan-enabled').checked, leadDays: Number(value('mizuho-plan-lead')), extraForSmallBills: $('mizuho-plan-extra').checked };
+        const node = $('mizuho-plan-status');
+        toggleBusy(true);
+        status(node, '保存中…');
+        try {
+            await requireVault().setMizuhoTransferPlan(plan);
+            cardDebitAccountsDirty = false;
+            status(node, '保存しました。');
+            onSaved('みずほへの送金予測を保存しました。');
+            render();
+        }
+        catch (err) {
+            status(node, `保存失敗：${err instanceof Error ? err.message : '入力を確認してください。'}`, true);
+        }
+        finally {
+            toggleBusy(false);
         }
     }
     function renderNisaLink() {
@@ -320,11 +599,17 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
             const path = item.kind === 'expense' ? `${accountName(item.fromAccountId)}から引落` :
                 item.kind === 'income' ? `${accountName(item.toAccountId)}へ入金` : `${accountName(item.fromAccountId)} → ${accountName(item.toAccountId)}`;
             const category = item.categoryId ? getCategories().find(c => c.id === item.categoryId)?.name : '';
-            const metadata = make('p', 'assets-recurring-meta', `${kindName[item.kind]} · ${frequencyLabel(item)} · ${path}${category ? ' · ' + category : ''}`);
-            const dates = make('p', 'assets-recurring-meta', `適用：${item.startOn.replace(/-/g, '/')} ～ ${item.endOn?.replace(/-/g, '/') ?? '終了日なし'}${item.enabled ? '' : ' · 停止中'}`);
+            const tags = make('div', 'assets-recurring-tags');
+            tags.append(make('span', 'assets-recurring-tag', kindName[item.kind]), make('span', 'assets-recurring-tag', frequencyLabel(item)));
+            if (category)
+                tags.append(make('span', 'assets-recurring-tag', category));
+            if (!item.enabled)
+                tags.append(make('span', 'assets-recurring-tag is-paused', '停止中'));
+            const route = make('p', 'assets-recurring-route', path);
+            const dates = make('p', 'assets-recurring-dates', `${item.startOn.replace(/-/g, '/')} ～ ${item.endOn?.replace(/-/g, '/') ?? '無期限'}`);
             const actions = make('div', 'assets-recurring-actions');
             actions.append(addButton('編集', () => populateForm(item)), addButton('削除', () => { void removeRecurring(item); }, true));
-            card.append(top, metadata, dates, actions);
+            card.append(top, tags, route, dates, actions);
             list.append(card);
         }
     }
@@ -357,25 +642,23 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
             $('assets-payroll-deposit').value = vault.assetSettings().payrollDepositAccount ?? '';
         const enabled = !!vault.assetSettings().payrollAutoPassphrase;
         $('assets-payroll-auto-status').textContent = enabled
-            ? '自動連携：有効（Finance保管庫の解除後、給与実績を自動取得します）'
-            : '自動連携：未登録（初回はPayrollのパスフレーズを入力してください）';
-        const summary = $('assets-payroll-summary');
-        summary.classList.toggle('hidden', !payrollSynced);
+            ? '自動取得：オン'
+            : '自動取得：オフ';
+        const months = $('assets-payroll-months');
         if (!payrollSynced) {
-            summary.open = false;
+            $('assets-payroll-count').textContent = '';
+            $('assets-payroll-last').textContent = '';
+            months.replaceChildren();
             return;
         }
         $('assets-payroll-count').textContent = `${payrollIncome.length}件`;
         $('assets-payroll-last').textContent = new Date(payrollSyncedAt).toLocaleString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-        const months = $('assets-payroll-months');
         months.replaceChildren();
-        for (const [month, amounts] of [...incomeByMonth(payrollIncome)].sort((a, b) => b[0].localeCompare(a[0])).slice(0, 18)) {
+        for (const [month, amounts] of [...incomeByMonth(payrollIncome)].sort((a, b) => b[0].localeCompare(a[0]))) {
             const row = make('div', 'assets-payroll-month');
             row.append(make('span', '', month.replace('-', '年') + '月'), make('small', '', `${amounts.count}件`));
             months.append(row);
         }
-        if (!payrollIncome.length)
-            months.append(make('p', 'assets-help', '公開済みの給与実績はありません。'));
         const recurring = vault.assetSettings().recurring.filter(e => e.enabled && e.kind === 'income' && /給与|給料|salary|payroll/i.test(e.name));
         if (recurring.length)
             status($('assets-payroll-status'), `給与を${payrollIncome.length}件読み込みました。注意：給与らしい定期入金が${recurring.length}件登録されています。二重計上にご注意ください。`);
@@ -427,6 +710,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
             status($('assets-payroll-status'), `Payrollから${items.length}件の給与実績を${automatic ? '自動取得' : '取得'}しました。`);
             renderAccounts();
             renderPayroll();
+            onPayrollChange();
         }
         catch (error) {
             // In case of a revoked password or interrupted download, never forecast from stale salaries.
@@ -439,6 +723,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
                 renderAccounts();
                 renderPayroll();
             }
+            onPayrollChange();
         }
         finally {
             payrollBusy = false;
@@ -483,6 +768,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
             status($('assets-payroll-status'), '自動連携を解除し、Financeの暗号化設定から連携パスフレーズを削除しました。');
             renderAccounts();
             renderPayroll();
+            onPayrollChange();
         }
         catch (error) {
             status($('assets-payroll-status'), `連携解除の保存に失敗しました：${error instanceof Error ? error.message : '通信エラー'}`, true);
@@ -532,7 +818,10 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
         choices(cat, [{ value: '', label: '分類しない' }, ...getCategories().map(c => ({ value: c.id, label: c.name }))]);
         cat.value = selected;
         renderAccounts();
+        renderOnce();
         renderNisaLink();
+        renderCardDebitAccounts();
+        renderMizuhoPlan();
         renderPayroll();
         renderRecurring();
     }
@@ -556,41 +845,48 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
         amount.setAttribute('aria-label', `${account.name}の残高`);
         amountLabel.append(amount);
         amounts.set(account.id, amount);
-        const dateRow = make('div', 'assets-date-row');
-        const dateHeader = make('div', 'assets-date-header');
-        const date = document.createElement('input');
-        date.type = 'datetime-local';
-        date.id = `assets-date-${account.id}`;
-        date.value = localDateTime();
-        date.setAttribute('aria-label', `${account.name}の残高確認日時`);
-        dates.set(account.id, date);
-        const dateLabel = make('label', 'assets-date-field', '残高の確認日時');
-        dateLabel.setAttribute('for', date.id);
-        const now = addButton('↻ 現在', () => { date.value = localDateTime(); });
-        now.classList.add('assets-now');
-        now.setAttribute('aria-label', `${account.name}の確認日時を現在に更新`);
-        dateHeader.append(dateLabel, now);
-        dateRow.append(dateHeader, date);
-        fields.append(amountLabel, dateRow);
+        fields.append(amountLabel);
         const historyDetails = document.createElement('details');
         historyDetails.className = 'assets-history';
-        const sum = make('summary', '', '残高の記録履歴（');
-        const count = make('span', '', '0');
+        const sum = make('summary', 'assets-history-summary');
+        sum.append(make('span', 'assets-history-caption', '残高の記録履歴'));
+        const count = make('span', 'assets-history-counter', '（0件）');
         count.id = `assets-history-count-${account.id}`;
-        sum.append(count, document.createTextNode('件）'));
+        sum.append(count);
         historyDetails.append(sum);
         const history = make('div', 'assets-history-content');
         historyDetails.append(history);
         histories.set(account.id, history);
         article.append(header, balance, fields, historyDetails);
-        $(account.id === 'rakuten-bank' ? 'assets-account-main' : 'assets-account-savings').append(article);
+        $(account.id === 'rakuten-bank' || account.id === 'mizuho-bank' ? 'assets-account-main' : 'assets-account-savings').append(article);
+        const info = $('assets-account-info');
+        const detailRow = make('div', 'assets-info-row');
+        const heading = make('strong', '', account.name);
+        const detail = make('div', 'assets-info-text');
+        accountDetails.set(account.id, detail);
+        detailRow.append(heading, detail);
+        info.append(detailRow);
     }
+    choices($('assets-once-from'), ASSET_ACCOUNTS.map(x => ({ value: x.id, label: x.name })));
+    choices($('assets-once-to'), ASSET_ACCOUNTS.map(x => ({ value: x.id, label: x.name })));
+    resetOnceForm();
+    $('assets-once-add').addEventListener('click', () => openOnce());
+    $('assets-once-toggle').addEventListener('click', () => { onceShowAll = !onceShowAll; renderOnce(); });
+    $('assets-once-close').addEventListener('click', closeOnce);
+    $('assets-once-cancel').addEventListener('click', closeOnce);
+    onceDialog.addEventListener('cancel', event => { event.preventDefault(); closeOnce(); });
+    $('assets-once-form').addEventListener('input', () => { onceDirty = true; });
+    $('assets-once-form').addEventListener('change', () => { onceDirty = true; onceFormFields(); });
+    $('assets-once-form').addEventListener('submit', event => { event.preventDefault(); void saveOnce(); });
     $('assets-balances-form').addEventListener('submit', event => { event.preventDefault(); void saveSnapshots(); });
     choices($('assets-nisa-card'), CARDS.map(c => ({ value: c.id, label: c.name })));
     $('assets-nisa-link-form').addEventListener('input', () => { nisaDirty = true; });
     $('assets-nisa-link-form').addEventListener('change', () => { nisaDirty = true; });
     $('assets-nisa-link-form').addEventListener('submit', event => { event.preventDefault(); void updateNisaLink(); });
     $('assets-nisa-disable').addEventListener('click', () => { void updateNisaLink(true); });
+    $('assets-card-debits-form').addEventListener('submit', event => { event.preventDefault(); void saveCardDebitAccounts(); });
+    $('mizuho-plan-form').addEventListener('submit', event => { event.preventDefault(); void saveMizuhoPlan(); });
+    $('mizuho-plan-extra').addEventListener('change', () => { $('mizuho-plan-example').textContent = `例：24,245円 → ${yen(estimateMizuhoTransferAmount(24245, $('mizuho-plan-extra').checked))}、160,500円 → ${yen(estimateMizuhoTransferAmount(160500, $('mizuho-plan-extra').checked))}`; });
     $('assets-payroll-connect').addEventListener('submit', event => { event.preventDefault(); void syncPayroll(); });
     $('assets-payroll-deposit-form').addEventListener('submit', event => { event.preventDefault(); void savePayrollDeposit(); });
     $('assets-payroll-deposit').addEventListener('change', () => { payrollAccountDirty = true; });
@@ -646,10 +942,16 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
     window.setInterval(refreshForNewDay, 120000);
     window.setInterval(() => { if (!document.hidden)
         void refreshPayroll(); }, 10 * 60 * 1000);
-    return { render, refreshPayroll, reset: () => {
+    return { render, refreshPayroll, payrollSnapshot: () => {
+            const ready = !!getVault()?.unlocked && payrollSynced && payrollOwner === getVault();
+            return ready ? { ready: true, syncedAt: payrollSyncedAt, entries: structuredClone(payrollIncome) } : { ready: false, syncedAt: null, entries: [] };
+        }, reset: () => {
             resetForm();
+            resetOnceForm();
+            onceShowAll = false;
             nisaDirty = false;
             payrollAccountDirty = false;
+            cardDebitAccountsDirty = false;
             payrollSession = null;
             payrollIncome = [];
             payrollSynced = false;
@@ -657,14 +959,17 @@ export function initAssetsSettings(getVault, getCategories, onSaved) {
             lastPayrollAttemptAt = 0;
             payrollOwner = null;
             $('assets-payroll-secret').value = '';
-            status($('assets-payroll-status'), 'Finance保管庫の解除後、登録済みの場合は自動で同期します。');
-            for (const account of ASSET_ACCOUNTS) {
+            $('assets-payroll-count').textContent = '';
+            $('assets-payroll-last').textContent = '';
+            $('assets-payroll-months').replaceChildren();
+            status($('assets-payroll-status'), '');
+            for (const account of ASSET_ACCOUNTS)
                 amounts.get(account.id).value = '';
-                dates.get(account.id).value = localDateTime();
-            }
             status($('assets-balances-status'), '');
             status($('assets-recurring-status'), '');
+            status($('assets-once-status'), '');
             render();
-        }, isBusy: () => busy || payrollBusy, isDirty: () => dirty || nisaDirty || payrollAccountDirty || editing() || [...amounts.values()].some(input => input.value.trim() !== '') ||
+            onPayrollChange();
+        }, isBusy: () => busy || payrollBusy, isDirty: () => onceDirty || dirty || nisaDirty || payrollAccountDirty || editing() || [...amounts.values()].some(input => input.value.trim() !== '') ||
             value('assets-recurring-name').trim() !== '' || value('assets-recurring-amount').trim() !== '' };
 }

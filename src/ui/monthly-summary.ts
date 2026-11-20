@@ -1,11 +1,14 @@
 /** Monthly summary view. DOM updates only; all financial figures are computed from vault snapshots. */
 import { monthlyReport, changePeriod, type MonthlyReport, type MonthlySource, type SummaryCard } from '../summary/monthly-summary.js';
 import { PALETTE } from '../cloud/merchant-rules.js';
-import { bankTimeline } from '../summary/bank-timeline.js';
+import { monthlyPointBenefits } from '../summary/point-benefits.js';
+import { pointBenefitsSection } from './point-benefits.js';
+import { bankTimeline, type BankEvent } from '../summary/bank-timeline.js';
+import { bankChartData, type BankChartPoint } from './bank-chart-data.js';
 import { ASSET_ACCOUNTS, type AssetAccountId } from '../cloud/assets.js';
 
-export interface MonthlySummaryUi {render():void;reset():void}
-export interface MonthlySummaryDeps {source():MonthlySource|null;openRecord(id:string):void;saveCardAccounts?(accounts:Record<string,'rakuten-bank'|'cash-savings'>):Promise<void>}
+export interface MonthlySummaryUi {render():void;reset():void;setPeriod(period:string):void}
+export interface MonthlySummaryDeps {source():MonthlySource|null;openRecord(id:string):void;openReport?(period:string):void;openRecurring?(entryId:string):void;saveCardAccounts?(accounts:Record<string,'rakuten-bank'|'cash-savings'>):Promise<void>}
 function element(tag:string, cls='',text?:string):HTMLElement{
   const node=document.createElement(tag);
   if(cls)node.className=cls;
@@ -50,55 +53,124 @@ function statusText(report:MonthlyReport):string{
   if(report.provisional.length)return '暫定カード請求・定期入出金予定を含む月間収支です。';
   return '給与実績・カード請求・定期入出金を集計した月間収支です。';
 }
-/** Day-end projected balance graph. Positions are proportional to calendar dates. */
-function bankChart(timeline:ReturnType<typeof bankTimeline>,period:string):HTMLElement|null {
-  if(timeline.startBalance===null||!timeline.startDay)return null;
-  const year=Number(period.slice(0,4)),month=Number(period.slice(5));
-  const count=new Date(Date.UTC(year,month,0)).getUTCDate();
-  const first=`${period}-01`;
-  let opening=timeline.startBalance;
-  for(const day of timeline.days)if(day.date<first)opening=day.balance;
-  // No invented balance before a mid-month snapshot.
-  const firstKnown=timeline.startDay>=first?Number(timeline.startDay.slice(8)):1;
-  const points:[number,number,string][]=[[firstKnown,opening,firstKnown===1?'月初':`${month}/${firstKnown} 基準残高`]];
-  for(const day of timeline.days)if(day.date>=first&&day.date.startsWith(period)){
-    points.push([Number(day.date.slice(8)),day.balance,day.date.slice(5).replace('-','/')]);
+/** Interactive, read-only projection. No bank event or snapshot is modified here. */
+function bankEventType(item:BankEvent):string {
+  if(item.provisional)return '暫定';
+  switch(item.kind){
+    case 'card': return 'カード引落';
+    case 'salary': return 'Payroll登録';
+    case 'salary-estimate': return '給与見込み';
+    case 'recurring': return '定期予定';
+    case 'transfer': return '送金予測';
+    case 'one-time': return '単発入出金';
   }
-  const last=points[points.length-1]!;
-  if(last[0]!==count)points.push([count,last[1],'月末']);
-  const values=points.map(item=>item[1]);
+}
+function bankChart(timeline:ReturnType<typeof bankTimeline>,period:string):HTMLElement|null {
+  const chart=bankChartData(timeline,period);
+  if(!chart)return null;
+  const points=chart.series, selectable=chart.selectable;
+  const values=points.map(point=>point.balance);
   let low=Math.min(0,...values),high=Math.max(0,...values);
   if(low===high){low-=10000;high+=10000;}
-  const range=high-low;const W=630,H=142,L=60,R=13,T=10,B=23;
-  const x=(day:number)=>L+(day-1)/(Math.max(1,count-1))*(W-L-R);
+  const range=high-low,W=630,H=142,L=60,R=13,T=10,B=23;
+  const x=(day:number)=>L+(day-1)/Math.max(1,chart.lastDay-1)*(W-L-R);
   const y=(value:number)=>T+(high-value)/range*(H-T-B);
   const ns='http://www.w3.org/2000/svg';
-  const svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox',`0 0 ${W} ${H}`);svg.setAttribute('role','img');
-  svg.setAttribute('aria-label','楽天銀行の月内予測残高グラフ');svg.classList.add('monthly-balance-svg');
   const node=(tag:string,attrs:Record<string,string>)=>{const e=document.createElementNS(ns,tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);return e;};
+  const svg=node('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':'楽天銀行の月内予測残高。点をタップ、または下の日付ボタンで詳細を選べます。',class:'monthly-balance-svg'});
   for(let i=0;i<=2;i++){
-    const val=low+range*i/2;const yy=y(val);
+    const val=low+range*i/2,yy=y(val);
     svg.append(node('line',{x1:String(L),x2:String(W-R),y1:String(yy),y2:String(yy),class:Math.abs(val)<range/8?'monthly-chart-zero':'monthly-chart-grid'}));
     const t=node('text',{x:String(L-9),y:String(yy+4),'text-anchor':'end',class:'monthly-chart-label'});
     t.textContent=`${Math.round(val/10000).toLocaleString('ja-JP')}万`;svg.append(t);
   }
-  const path:string[]=[`M${x(points[0]![0]).toFixed(2)} ${y(points[0]![1]).toFixed(2)}`];
+  const path:string[]=[`M${x(points[0]!.day).toFixed(2)} ${y(points[0]!.balance).toFixed(2)}`];
   for(let i=1;i<points.length;i++){
-    const [day,value]=points[i]!;
-    path.push(`H${x(day).toFixed(2)}`,`V${y(value).toFixed(2)}`);
+    const point=points[i]!;
+    path.push(`H${x(point.day).toFixed(2)}`,`V${y(point.balance).toFixed(2)}`);
   }
   svg.append(node('path',{d:path.join(' '),class:'monthly-chart-path',fill:'none'}));
-  for(const [day,value,label] of points){
-    const dot=node('circle',{cx:String(x(day)),cy:String(y(value)),r:'4',class:'monthly-chart-point'});
-    const title=node('title',{});title.textContent=`${label}：${yen(value)}`;dot.append(title);svg.append(dot);
+  const markers:SVGElement[]=[],buttons:HTMLButtonElement[]=[];
+  const section=element('div','monthly-chart');
+  const plot=element('div','monthly-chart-plot');plot.append(svg);section.append(plot);
+  const hint=element('p','monthly-chart-hint','グラフの点か日付を選択すると、入出金の内訳を確認できます。');
+  section.append(hint);
+  const dateList=element('div','monthly-chart-dates');dateList.setAttribute('role','group');dateList.setAttribute('aria-label','グラフの日付を選択');
+  section.append(dateList);
+  const detail=element('section','monthly-chart-detail');detail.setAttribute('aria-label','選択日の残高と入出金内訳');
+  section.append(detail);
+  function dateText(p:BankChartPoint):string{return `${Number(period.slice(0,4))}年${Number(period.slice(5))}月${p.day}日`;}
+  function paintDetail(point:BankChartPoint):void {
+    detail.replaceChildren();
+    const isConfirmedBaseline=point.kind==='opening'&&point.date===timeline.startDay;
+    const name=point.kind==='opening'?(isConfirmedBaseline?'確認済み残高の基準日':'月初時点の予測'):point.kind==='month-end'?'月末の予測':'登録済みの入出金反映後';
+    const header=element('div','monthly-chart-detail-heading');
+    header.append(element('strong','',dateText(point)),element('span','monthly-chart-detail-status',name));detail.append(header);
+    const totals=element('div','monthly-chart-detail-totals');
+    const total=(title:string,value:string,tone='')=>{
+      const item=element('div','monthly-chart-detail-total');
+      item.append(element('span','monthly-muted',title),element('strong',tone,value));totals.append(item);
+    };
+    total('この日の増減',`${point.delta>0?'+':''}${yen(point.delta)}`);
+    total(isConfirmedBaseline?'登録した基準残高':'日末の予測残高',yen(point.balance),point.balance<0?'monthly-negative':'');
+    detail.append(totals);
+    if(point.items.length){
+      const list=element('div','monthly-chart-detail-events');
+      for(const item of point.items){
+        const row=element('div','monthly-chart-detail-event');
+        const description=element('div','monthly-chart-detail-event-name');
+        description.append(element('strong','',item.title),element('small','monthly-muted',bankEventType(item)));
+        row.append(description,element('b','',`${item.amount>0?'+':''}${yen(item.amount)}`));list.append(row);
+      }
+      detail.append(list);
+    }else{
+      detail.append(element('p','monthly-muted',isConfirmedBaseline?'この日は登録済みの残高を基準にしています。':'この日付に登録された入出金はありません。'));
+    }
+    detail.append(element('p','monthly-chart-caveat','予測残高は登録情報による計算値です。銀行の実際の残高を取得しているわけではありません。'));
   }
-  for(const day of [1,Math.ceil(count/2),count]){
-    const text=node('text',{x:String(x(day)),y:String(H-10),'text-anchor':day===1?'start':day===count?'end':'middle',class:'monthly-chart-label'});
-    text.textContent=`${day}日`;svg.append(text);
+  let selected=-1;
+  function choose(index:number,focus=false):void {
+    if(index<0||index>=selectable.length)return;
+    selected=index;
+    for(let i=0;i<markers.length;i++){
+      markers[i]!.classList.toggle('is-selected',i===index);
+    }
+    for(let i=0;i<buttons.length;i++){
+      buttons[i]!.setAttribute('aria-pressed',String(i===index));
+      if(i===index&&focus)buttons[i]!.focus();
+    }
+    paintDetail(selectable[index]!);
   }
-  const section=element('div','monthly-chart');section.append(svg);return section;
+  for(const [index,point] of selectable.entries()){
+    const group=node('g',{class:'monthly-chart-marker'});
+    group.append(node('circle',{cx:String(x(point.day)),cy:String(y(point.balance)),r:'4',class:'monthly-chart-point'}));
+    const hit=node('circle',{cx:String(x(point.day)),cy:String(y(point.balance)),r:'17',class:'monthly-chart-hit'});
+    const title=node('title',{});title.textContent=`${dateText(point)}：${yen(point.balance)}。タップして詳細を表示`;
+    group.append(hit,title);group.addEventListener('click',()=>choose(index));svg.append(group);markers.push(group);
+    const button=element('button','monthly-chart-date') as HTMLButtonElement;
+    button.type='button';button.textContent=`${point.day}日`;
+    button.setAttribute('aria-label',`${dateText(point)}の入出金内訳`);
+    button.setAttribute('aria-pressed','false');
+    button.addEventListener('click',()=>choose(index));
+    button.addEventListener('keydown',(event:KeyboardEvent)=>{
+      const next=event.key==='ArrowRight'||event.key==='ArrowDown'?index+1:event.key==='ArrowLeft'||event.key==='ArrowUp'?index-1:event.key==='Home'?0:event.key==='End'?buttons.length-1:null;
+      if(next!==null){event.preventDefault();choose(Math.max(0,Math.min(buttons.length-1,next)),true);}
+    });
+    dateList.append(button);buttons.push(button);
+  }
+  for(const day of [1,Math.ceil(chart.lastDay/2),chart.lastDay]){
+    const t=node('text',{x:String(x(day)),y:String(H-10),'text-anchor':day===1?'start':day===chart.lastDay?'end':'middle',class:'monthly-chart-label'});
+    t.textContent=`${day}日`;svg.append(t);
+  }
+  // Prefer a real event over the synthetic month-end marker on first display.
+  const defaultIndex=selectable.map(p=>p.kind).lastIndexOf('event');
+  choose(defaultIndex>=0?defaultIndex:selectable.length-1);
+  return section;
 }
 export function initMonthlySummary(deps:MonthlySummaryDeps):MonthlySummaryUi {
+  const reportOpen=document.getElementById('monthly-report-open');
+  reportOpen?.addEventListener('click',()=>deps.openReport?.(period));
+
   let period=localPeriod();
   const picker=document.getElementById('monthly-period') as HTMLInputElement;
   const main=document.getElementById('monthly-content') as HTMLElement;
@@ -139,10 +211,17 @@ export function initMonthlySummary(deps:MonthlySummaryDeps):MonthlySummaryUi {
     const alert=element('div','monthly-alert');alert.append(element('strong','',statusText(report)));
     alert.append(element('p','',`前月比：${delta===null?'比較不可':yen(delta)} · 内部振替は月間収支に含めません。`));
     if(report.cardOutflow===null)alert.append(element('p','', 'この月に集計できるカード明細がありません（未登録または要修正）。計算上の引落額は0円として扱いますが、実際に0円とは確認できていません。'));
-    if(report.recurringCardOverlap)alert.append(element('p','',`定期支出とカード明細で、名称・金額が一致する取引が${report.recurringCardOverlap}件あります。二重計上の可能性があるため口座管理を確認してください。`));
+    if(report.recurringCardOverlap){
+      alert.prepend(element('strong','monthly-overlap-warning','要確認：カードと銀行の定期支出が重複している可能性があります。収支は両方を含む暫定的な登録額です。'));
+      alert.append(element('p','',`名称・金額が一致する定期支出が${report.recurringCardOverlap}件あります。実際の支払いを照合し、二重登録なら口座管理で修正してください。`));
+      for(const entry of report.recurringLines.filter(item=>item.cardOverlap)){
+        line(alert,`確認・修正：${entry.name}（${entry.date}）`,yen(entry.amount),deps.openRecurring?()=>deps.openRecurring!(entry.entryId):undefined);
+      }
+    }
     if(report.recurringSalaryExcluded)alert.append(element('p','',`給与に見える定期収入${report.recurringSalaryExcluded}件は、Payrollとの二重計上を防ぐため除外しました。`));
     alert.append(element('p','', '定期入出金は登録内容に基づく予定です。銀行での入出金完了を確認した実績ではありません。'));
     main.append(alert);
+    main.append(pointBenefitsSection('獲得ポイント',monthlyPointBenefits(period,source)));
     // Bank cash flow is separate from whole-household monthly income/expense.
     // It starts from a manually confirmed bank balance, never a fabricated zero.
     const bank=section('楽天銀行の残高推移');
@@ -161,7 +240,9 @@ export function initMonthlySummary(deps:MonthlySummaryDeps):MonthlySummaryUi {
     if(timeline.missingCardAccounts.length)bank.body.append(element('p','monthly-bank-notice',`引落口座未設定：${timeline.missingCardAccounts.join('、')}。口座管理で設定できます。`));
     if(timeline.minimum!==null&&timeline.minimum<0)bank.body.append(element('p','monthly-bank-danger','引落予定に対して残高不足となる日があります。'));
     if(timeline.days.length){
-      const timelineList=element('div','monthly-bank-days');bank.body.append(timelineList);
+      const allDays=element('details','monthly-bank-all');
+      allDays.append(element('summary','','すべての入出金予定を表示'));
+      const timelineList=element('div','monthly-bank-days');allDays.append(timelineList);bank.body.append(allDays);
       for(const day of timeline.days){
         const item=element('div','monthly-bank-day');
         const date=element('div','monthly-bank-day-date',day.date.slice(5).replace('-','/'));
@@ -258,5 +339,5 @@ export function initMonthlySummary(deps:MonthlySummaryDeps):MonthlySummaryUi {
     }
     line(quality.body,'単発入出金',`${report.oneTimeLines.length}件`);
   }
-  return {render,reset:()=>{period=localPeriod();picker.value=period;main.replaceChildren();label.textContent=periodDisplay(period);}};
+  return {render,setPeriod:(next:string)=>{if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(next))throw new Error("年月が不正です。");go(next);},reset:()=>{period=localPeriod();picker.value=period;main.replaceChildren();label.textContent=periodDisplay(period);}};
 }

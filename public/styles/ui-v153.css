@@ -29,9 +29,6 @@
 /* Navigation disclosure: no vertical branch line, no glyph triangle. */
 .sidebar .sidebar-subnav,.sidebar.mobile-open .sidebar-subnav{border-left:0!important;padding-left:0!important;margin-left:18px!important}
 .sidebar .sidebar-group>summary{position:relative;background:transparent!important}
-.sidebar .sidebar-group>summary::after{width:16px;height:16px;flex:0 0 16px;border:0;background:transparent!important;content:'';background-image:none!important}
-.sidebar .sidebar-group>summary::before{content:'';position:absolute;right:14px;top:50%;width:7px;height:7px;border-right:1.8px solid #a8b9c9;border-bottom:1.8px solid #a8b9c9;transform:translateY(-68%) rotate(45deg);transition:none}
-.sidebar .sidebar-group[open]>summary::before{transform:translateY(-30%) rotate(225deg)}
 .sidebar .sidebar-group>summary:hover{background:#273750!important}
 /* Desktop ledger: one clear merchant field, metadata below, rule action stays discoverable. */
 .manage-editor .transaction-table{table-layout:fixed;min-width:730px}

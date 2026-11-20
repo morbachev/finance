@@ -1007,11 +1007,8 @@ body{overflow:hidden}
 .assets-payroll-metrics small{font-size:10px;color:var(--muted);display:block}
 .assets-payroll-metrics strong{font-size:13px;display:block;margin-top:5px;overflow-wrap:anywhere}
 .assets-payroll-summary h3{font-size:12px;margin:15px 0 8px;color:var(--ink)}
-.assets-payroll-months{display:grid;gap:6px;max-height:245px;overflow:auto}
-.assets-payroll-month{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:8px 11px;border:1px solid var(--line);border-radius:8px;font-size:12px;min-width:0}
-.assets-payroll-month small{color:var(--muted);font-size:10px;white-space:nowrap}
 @media(max-width:700px){.assets-payroll-layout{grid-template-columns:minmax(0,1fr)}}
-@media(max-width:420px){.assets-payroll-panel{padding:14px}.assets-payroll-layout form{padding:11px}.assets-payroll-month{gap:7px;padding:7px;font-size:11px}}
+@media(max-width:420px){.assets-payroll-panel{padding:14px}.assets-payroll-layout form{padding:11px}}
 /* Display a password rotation message only after an action has a result. */
 .cloud-rotate-panel #cloud-rotate-status:empty{display:none}
 

@@ -5,7 +5,7 @@ import { getCard, type ImportRow, type ParsedStatement } from '../models/types.j
 import type { CloudRecord } from '../cloud/merge.js';
 import { importErrors } from '../importers/batch-policy.js';
 import { displayMerchant, matchingRule, type CategoryDefinition, type MerchantRule } from '../cloud/merchant-rules.js';
-import { recurringCoveredByOneTime, type AssetAccountId, type AssetsDocument, type OneTimeEntry } from '../cloud/assets.js';
+import { recurringCoveredByOneTime, nisaRuleOnDay, type AssetAccountId, type AssetsDocument, type OneTimeEntry } from '../cloud/assets.js';
 import { recurringInMonth } from '../cloud/recurring-schedule.js';
 import type { PayrollIncomeEntry } from '../cloud/payroll-income.js';
 
@@ -14,7 +14,7 @@ export interface SummaryIncomeEstimate { employer: 'main'; kind: 'salary'; sourc
 export interface SummaryCard { id: string; cardId: string; name: string; billingMonth: string | null; paymentDate: string; amount: number; confirmation: ParsedStatement['confirmation'] }
 export interface SummaryCategory { id: string; name: string; color: string | null; amount: number; count: number }
 export interface SummaryMerchant { name: string; amount: number; count: number }
-export interface SummaryRecurring { id:string; entryId:string; name:string; date:string; kind:'expense'|'income'|'transfer'; amount:number; fromAccountId:AssetAccountId|null; toAccountId:AssetAccountId|null; categoryId:string|null; payrollOverlap:boolean }
+export interface SummaryRecurring { id:string; entryId:string; name:string; date:string; kind:'expense'|'income'|'transfer'; amount:number; fromAccountId:AssetAccountId|null; toAccountId:AssetAccountId|null; categoryId:string|null; payrollOverlap:boolean; cardOverlap:boolean }
 export interface SummaryIssue { id: string; title: string; reason: string; month: string | null }
 export interface MonthlyReport {
   period: string;
@@ -50,7 +50,7 @@ export interface MonthlyReport {
   payrollSyncedAt: number | null;
 }
 export interface PayrollSnapshot { ready: boolean; syncedAt: number | null; entries: readonly PayrollIncomeEntry[] }
-export interface MonthlySource { records: readonly CloudRecord[]; rules: readonly MerchantRule[]; categories: readonly CategoryDefinition[]; assets: Pick<AssetsDocument,'nisaCardRule'|'recurring'> & Partial<Pick<AssetsDocument,'snapshots'|'payrollDepositAccount'|'cardDebitAccounts'|'mizuhoTransferPlan'|'oneTime'>>; payroll: PayrollSnapshot; /** Optional injected local month for deterministic tests. */ currentPeriod?:string }
+export interface MonthlySource { records: readonly CloudRecord[]; rules: readonly MerchantRule[]; categories: readonly CategoryDefinition[]; assets: Pick<AssetsDocument,'nisaCardRule'|'recurring'> & Partial<Pick<AssetsDocument,'nisaCardRuleHistory'>> & Partial<Pick<AssetsDocument,'snapshots'|'payrollDepositAccount'|'cardDebitAccounts'|'cardPreferences'|'cardRecurringDecisions'|'mizuhoTransferPlan'|'oneTime'>>; payroll: PayrollSnapshot; /** Optional injected local month for deterministic tests. */ currentPeriod?:string }
 const validPeriod = (value: string): boolean => /^(19|20|21)\d{2}-(0[1-9]|1[0-2])$/.test(value);
 export function isValidPeriod(value:string): boolean {return validPeriod(value);}
 function validDay(value: string | null | undefined): value is string {
@@ -79,8 +79,8 @@ export function estimateRegularNet(previous:PayrollIncomeEntry):number|null {
   if(nonTaxable>previous.netPay)return null;
   return previous.netPay-nonTaxable;
 }
-function nisaMatch(row: ImportRow, stmt: ParsedStatement, assets: MonthlySource['assets']):boolean {
-  const config=assets.nisaCardRule;
+export function isNisaCardRow(row: ImportRow, stmt: ParsedStatement, assets: MonthlySource['assets']):boolean {
+  const config=validDay(row.usedOn)?nisaRuleOnDay(assets,row.usedOn):null;
   return !!config?.enabled && stmt.cardId===config.cardId &&
     normalized(row.merchant).includes(normalized(config.merchantContains)) &&
     validDay(row.usedOn);
@@ -89,8 +89,9 @@ function categoryFor(row: ImportRow, statement: ParsedStatement, rules: readonly
   const categoryId=matchingRule(row.merchant,statement.cardId,rules)?.categoryId;
   return categories.find(c=>c.id===categoryId)??null;
 }
-function cardTitle(record: CloudRecord): string {
-  return getCard(record.statement.cardId??'')?.name??'カード不明';
+function cardTitle(record:CloudRecord,source:MonthlySource):string {
+  const id=record.statement.cardId??'';
+  return source.assets.cardPreferences?.[id]?.name??getCard(id)?.name??'カード不明';
 }
 /** Unknown payment dates are listed globally since they cannot be attributed to a month. */
 export function monthlyReport(period: string, source: MonthlySource):MonthlyReport {
@@ -127,15 +128,15 @@ export function monthlyReport(period: string, source: MonthlySource):MonthlyRepo
     if(s.rows.some((row,i)=>s.rows.findIndex(x=>x.id===row.id)!==i))reasons.push('取引行IDが重複しています');
     if(month===null)reasons.push('支払日が不明または不正です');
     const reason=[...new Set(reasons)].join(' / ');
-    if(reason){issues.push({id:record.id,title:cardTitle(record),reason,month});if(month===period)excludedCount++;continue;}
+    if(reason){issues.push({id:record.id,title:cardTitle(record,source),reason,month});if(month===period)excludedCount++;continue;}
     if(month!==period)continue;
     const amt=s.rows.reduce((acc,row)=>add(acc,row.amount),0);
-    const line:SummaryCard={id:record.id,cardId:s.cardId!,name:cardTitle(record),billingMonth:s.billingMonth,paymentDate:s.paymentDate!,amount:amt,confirmation:s.confirmation};
+    const line:SummaryCard={id:record.id,cardId:s.cardId!,name:cardTitle(record,source),billingMonth:s.billingMonth,paymentDate:s.paymentDate!,amount:amt,confirmation:s.confirmation};
     if(s.confirmation==='provisional')provisional.push(line);
     included++;sum=add(sum,amt);cardLines.push(line);
     if(s.confirmation==='unknown')unknownConfirmationCount++;
     for(const row of s.rows){
-      if(nisaMatch(row,s,source.assets)) {nisa=add(nisa,row.amount);continue;}
+      if(isNisaCardRow(row,s,source.assets)) {nisa=add(nisa,row.amount);continue;}
       const category=categoryFor(row,s,source.rules,source.categories);
       const id=category?.id??'__unclassified';
       const old=categoryTotals.get(id)??{id,name:category?.name??'未分類',color:category?.color??null,amount:0,count:0};
@@ -196,7 +197,8 @@ export function monthlyReport(period: string, source: MonthlySource):MonthlyRepo
     const payrollOverlap=e.kind==='income'&&payrollName.test(e.name) && source.payroll.ready;
     if(payrollOverlap){recurringSalaryExcluded++;continue;}
     const line:SummaryRecurring={id:occurrence.id,entryId:e.id,name:e.name,date:occurrence.date,kind:e.kind,
-      amount:e.amount,fromAccountId:e.fromAccountId,toAccountId:e.toAccountId,categoryId:e.categoryId,payrollOverlap:false};
+      amount:e.amount,fromAccountId:e.fromAccountId,toAccountId:e.toAccountId,categoryId:e.categoryId,payrollOverlap:false,
+      cardOverlap:e.kind==='expense'&&cardRowsForOverlap.some(row=>row.name===normalized(e.name).trim()&&row.amount===e.amount)};
     recurringLines.push(line);
     if(e.kind==='income')recurringIncome=add(recurringIncome,e.amount);
     if(e.kind==='expense'){
@@ -208,7 +210,7 @@ export function monthlyReport(period: string, source: MonthlySource):MonthlyRepo
       categoryTotals.set(id,old);
       if(!category)unclassifiedCount++;
       // A possible duplicate is a review warning, not grounds to silently discard expenses.
-      if(cardRowsForOverlap.some(row=>row.name===normalized(e.name).trim()&&row.amount===e.amount))recurringCardOverlap++;
+      if(line.cardOverlap)recurringCardOverlap++;
     }
     if(e.kind==='transfer')recurringTransfers=add(recurringTransfers,e.amount);
   }

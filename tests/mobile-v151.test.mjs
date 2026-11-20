@@ -6,21 +6,22 @@ const html=readFileSync(new URL('public/index.html',root),'utf8');
 const css=readFileSync(new URL('public/styles/mobile-v151.css',root),'utf8');
 const script=readFileSync(new URL('src/main.ts',root),'utf8');
 
-test('mobile: PDF picker is a single visible button while desktop keeps native drag/drop',()=>{
+test('mobile: CSV/PDF picker is a single visible button while desktop keeps native drag/drop',()=>{
   assert.match(html,/id="dropzone"[^>]+for="file-input"/);
-  assert.match(html,/class="drop-mobile-label">PDFファイルを選択/);
-  assert.match(html,/class="drop-desktop-label">PDFをここへドロップ/);
+  assert.match(html,/class="drop-mobile-label">CSV・PDFを選択/);
+  assert.match(html,/class="drop-desktop-label">CSV・PDFをここへドロップ/);
   assert.match(html,/id="file-input"[^>]+multiple/);
   assert.match(css,/\.drop-mobile-label\{display:none\}/);
   assert.match(css,/#pdf-pane \.dropzone \ .drop-mobile-label|#pdf-pane \.dropzone \.drop-mobile-label/);
   assert.match(css,/#pdf-pane \.dropzone[^}]*height:48px/);
 });
 
-test('mobile: theme is an icon button, desktop select retains system/light/dark',()=>{
+test('mobile and desktop both offer explicit icon toggles without a system selector',()=>{
   assert.match(html,/id="mobile-theme-toggle"[^>]*aria-label="ダークモードに切り替える"/);
-  for(const option of ['system','light','dark']) assert.match(html,new RegExp(`<option value="${option}"`));
+  assert.match(html,/id="desktop-theme-toggle"/);
+  assert.doesNotMatch(html,/id="theme-mode"|<option value="system"/);
   assert.match(css,/#finance-sidebar \.mobile-nav-panel \.sidebar-theme\{display:none!important\}/);
-  assert.match(script,/mobileToggle\?\.addEventListener\('click',[\s\S]*picker\.dispatchEvent\(new Event\('change'\)\)/);
+  assert.match(script,/const toggles = \[document\.getElementById\('mobile-theme-toggle'\),document\.getElementById\('desktop-theme-toggle'\)\]/);
 });
 
 test('mobile: hamburger and X are only icons, without text replacement',()=>{

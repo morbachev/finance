@@ -1,10 +1,11 @@
 import { validateMizuhoPlan } from './assets.js';
 import { GraphError } from './onedrive-api.js';
 import { decryptDocument, decryptIndex, decryptOriginal, deriveCloudKey, encryptDocument, encryptIndex, encryptOriginal, encryptRules, decryptRules, freshSalt, parseEnvelope, parseIndexEnvelope } from './cloud-crypto.js';
-import { emptyDocument, mergeDocuments, detectDocumentEditCollisions } from './merge.js';
+import { emptyDocument, mergeDocuments, detectDocumentEditCollisions, duplicateStatementMonths } from './merge.js';
 import { emptyIndex, statementBucket, validateIndex } from './layout.js';
-import { emptyAssets, mergeAssets, detectAssetsEditCollisions, describeAssetsEditCollisions, validateSnapshot, validateRecurring, validateOneTime, validateNisaCardRule, validatePayrollAutoPassphrase, validateBirthMonth, validateCardDebitAccounts } from './assets.js';
-import { encryptAssets, decryptAssets } from './cloud-crypto.js';
+import { emptyAssets, mergeAssets, detectAssetsEditCollisions, describeAssetsEditCollisions, validateSnapshot, validateRecurring, validateOneTime, withUpdatedNisaCardRule, validatePayrollAutoPassphrase, validateBirthMonth, validateCardDebitAccounts, validateCardPreferences, validateCardRecurringDecisions } from './assets.js';
+import { encryptAssets, decryptAssets, encryptMonthlyReport, decryptMonthlyReport } from './cloud-crypto.js';
+import { reportRevision, revisedDocument, snapshotHash } from '../reports/monthly-report.js';
 import { emptyRules, mergeRules, detectRuleEditCollisions, validateRule, validateCategory, listCategories, PALETTE, CATEGORIES } from './merchant-rules.js';
 const clone = (value) => structuredClone(value);
 const isConflict = (error) => error instanceof GraphError && (error.status === 409 || error.status === 412);
@@ -43,6 +44,8 @@ export class LiveVault {
     // An ambiguous write must never be retried from a stale in-memory base.
     rulesNeedRefresh = false;
     assetsNeedRefresh = false;
+    reportsNeedRefresh = new Set();
+    reportsSaving = false;
     /** In-memory retry plan. Sensitive cleartext is never stored in browser storage. */
     pendingYearBatch = null;
     hasRemote = false;
@@ -143,7 +146,73 @@ export class LiveVault {
         return clone(this.assetsDocument);
     }
     conflicts() { return [...this.shards.values()].reduce((count, s) => count + s.document.conflicts.length, 0); }
-    lock() { this.mutationWarning = null; this.dataSetId = null; this.client.setVaultDataSet?.(null); this.key = null; this.salt = ''; this.sessionExportable = false; this.shards.clear(); this.index = emptyIndex(); this.rulesDocument = emptyRules(); this.rulesRef = null; this.assetsDocument = emptyAssets(); this.assetsRef = null; this.rulesNeedRefresh = false; this.assetsNeedRefresh = false; this.pendingYearBatch = null; }
+    lock() { this.mutationWarning = null; this.dataSetId = null; this.client.setVaultDataSet?.(null); this.key = null; this.salt = ''; this.sessionExportable = false; this.shards.clear(); this.index = emptyIndex(); this.rulesDocument = emptyRules(); this.rulesRef = null; this.assetsDocument = emptyAssets(); this.assetsRef = null; this.rulesNeedRefresh = false; this.assetsNeedRefresh = false; this.pendingYearBatch = null; this.reportsNeedRefresh.clear(); }
+    /** Report storage is isolated by month; loading does not change any bank/statement data. */
+    async listArchivedMonths() {
+        if (!this.key || this.rotating)
+            throw new Error('保管庫を解除してください。');
+        await this.assertActiveGeneration();
+        return (await this.client.listMonthlyReports()).map(item => item.period);
+    }
+    async loadArchivedReport(period) {
+        if (!this.key || this.rotating)
+            throw new Error('保管庫を解除してください。');
+        await this.assertActiveGeneration();
+        const remote = await this.client.readMonthlyReport(period);
+        const result = remote ? await decryptMonthlyReport(remote.text, this.key, this.salt, period) : null;
+        this.reportsNeedRefresh.delete(period); // A confirmed read reconciles an earlier ambiguous write.
+        return result;
+    }
+    async saveArchivedReport(snapshot, note, expectedRevision) {
+        if (!this.key || this.rotating)
+            throw new Error('保管庫を解除してください。');
+        if (this.reportsSaving)
+            throw new Error('別のレポートを保存中です。');
+        if (this.reportsNeedRefresh.has(snapshot.period))
+            throw new CloudWriteUncertainError('保存結果を確認できません。最新のレポートを取得してください。', null);
+        if (note.length > 2000)
+            throw new Error('メモは2000文字以内にしてください。');
+        this.reportsSaving = true;
+        try {
+            await this.assertActiveGeneration();
+            const key = this.key;
+            const remote = await this.client.readMonthlyReport(snapshot.period);
+            const old = remote ? await decryptMonthlyReport(remote.text, key, this.salt, snapshot.period) : null;
+            if ((old?.current.id ?? null) !== expectedRevision)
+                throw new CloudEditCancelledError('別の端末でレポートが変更されています。最新の内容を取得してください。');
+            const hash = await snapshotHash(snapshot);
+            if (old && old.current.sourceHash === hash && old.current.note === note)
+                return old;
+            const updated = revisedDocument(old, reportRevision(snapshot, hash, note));
+            const text = await encryptMonthlyReport(updated, key, this.salt);
+            let returned = false;
+            try {
+                const written = await this.client.writeMonthlyReport(snapshot.period, text, remote ? { id: remote.id, etag: remote.etag } : null);
+                returned = true;
+                if (!written?.etag) {
+                    const readback = await this.client.readMonthlyReport(snapshot.period);
+                    if (!readback)
+                        throw new Error('保存したレポートを確認できません。');
+                    const verified = await decryptMonthlyReport(readback.text, key, this.salt, snapshot.period);
+                    if (verified.current.id !== updated.current.id)
+                        throw new Error('保存結果が一致しません。');
+                }
+                return updated;
+            }
+            catch (error) {
+                if (isConflict(error))
+                    throw new CloudEditCancelledError('別の端末でレポートが更新されました。最新の内容を取得してください。');
+                if (returned || !isDefiniteWriteRejection(error)) {
+                    this.reportsNeedRefresh.add(snapshot.period);
+                    throw new CloudWriteUncertainError('レポートは保存された可能性があります。最新の内容を取得して確認してください。', error);
+                }
+                throw error;
+            }
+        }
+        finally {
+            this.reportsSaving = false;
+        }
+    }
     /** Export a key only after an explicit opt-in unlock; immediately make the working key non-extractable. */
     async exportTabKey() {
         if (!this.key || !this.sessionExportable)
@@ -305,7 +374,7 @@ export class LiveVault {
     async changePassphrase(current, next, onProgress) {
         if (!this.key)
             throw new Error('保管庫のロック解除が必要です。');
-        if (this.rotating || this.assetsSaving)
+        if (this.rotating || this.assetsSaving || this.reportsSaving)
             throw new Error('保管庫の更新中です。操作完了後にお試しください。');
         if (next.length < 12)
             throw new Error('新しいパスフレーズは12文字以上にしてください。');
@@ -331,6 +400,14 @@ export class LiveVault {
             const { index, shards } = await this.readCurrent(this.key, this.salt, startFile);
             const rules = await this.readMerchantRules(this.key, this.salt);
             const assets = await this.readAssets(this.key, this.salt);
+            const reportRefs = typeof this.client.listMonthlyReports === 'function' ? await this.client.listMonthlyReports() : [];
+            const reports = new Map();
+            for (const ref of reportRefs) {
+                const file = await this.client.readMonthlyReport(ref.period);
+                if (!file || file.etag !== ref.etag)
+                    throw new Error('月次レポートが更新されました。再実行してください。');
+                reports.set(ref.period, await decryptMonthlyReport(file.text, this.key, this.salt, ref.period));
+            }
             const originals = new Map();
             for (const { document } of shards.values())
                 for (const item of document.records)
@@ -344,7 +421,7 @@ export class LiveVault {
             const salt = freshSalt();
             const key = await deriveCloudKey(next, salt);
             let completed = 0;
-            const total = shards.size + originals.size + (rules.ref ? 1 : 0) + (assets.ref ? 1 : 0);
+            const total = shards.size + originals.size + reports.size + (rules.ref ? 1 : 0) + (assets.ref ? 1 : 0);
             const progress = () => onProgress?.(`再暗号化して保存中… ${completed}/${total}ファイル`);
             progress();
             for (const [year, shard] of shards) {
@@ -372,6 +449,14 @@ export class LiveVault {
                 completed++;
                 progress();
             }
+            for (const [period, report] of reports) {
+                await target.writeMonthlyReport(period, await encryptMonthlyReport(report, key, salt), null);
+                const file = await target.readMonthlyReport(period);
+                if (!file || JSON.stringify(await decryptMonthlyReport(file.text, key, salt, period)) !== JSON.stringify(report))
+                    throw new Error(`${period}のレポートの再暗号化検証に失敗しました。`);
+                completed++;
+                progress();
+            }
             for (const { id, month } of originals.values()) {
                 const source = await this.client.downloadDatedOriginal(id, month);
                 const decrypted = await decryptOriginal(source, this.key);
@@ -393,6 +478,14 @@ export class LiveVault {
             const actual = new Map(nowFiles.map(file => [file.year, file]));
             if (actual.size !== shards.size || [...shards].some(([year, shard]) => actual.get(year)?.etag !== shard.ref.etag))
                 throw new Error('作業中に明細が更新されました。旧データはそのままです。再実行してください。');
+            if (reportRefs.length) {
+                const nowReports = await this.client.listMonthlyReports();
+                const latest = new Map(nowReports.map(ref => [ref.period, ref.etag]));
+                if (latest.size !== reportRefs.length || reportRefs.some(ref => latest.get(ref.period) !== ref.etag))
+                    throw new Error('作業中に月次レポートが変更されました。旧データはそのままです。');
+            }
+            else if (typeof this.client.listMonthlyReports === 'function' && (await this.client.listMonthlyReports()).length)
+                throw new Error('作業中に新しい月次レポートが保存されました。再実行してください。');
             const nowRules = await this.client.readMerchantRules();
             const nowAssets = await this.client.readAssetSettings();
             if ((nowRules?.etag ?? null) !== (rules.ref?.etag ?? null) || (nowAssets?.etag ?? null) !== (assets.ref?.etag ?? null))
@@ -786,11 +879,13 @@ export class LiveVault {
         next.payrollAutoPassphrase = validatePayrollAutoPassphrase(passphrase);
         await this.commitAssets(next);
     }
-    async setNisaCardRule(rule) {
+    async setNisaCardRule(rule, today) {
         if (!this.key)
             throw new Error('OneDrive保管庫を解除してください。');
-        const next = clone(this.assetsDocument);
-        next.nisaCardRule = validateNisaCardRule(rule);
+        const date = today ?? (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
+        const next = withUpdatedNisaCardRule(this.assetsDocument, rule, date);
+        if (JSON.stringify(next) === JSON.stringify(this.assetsDocument))
+            return;
         await this.commitAssets(next);
     }
     async setBirthMonth(value) {
@@ -818,6 +913,44 @@ export class LiveVault {
             throw new Error('保管庫を解除してください。');
         const next = clone(this.assetsDocument);
         next.cardDebitAccounts = validateCardDebitAccounts(value) ?? {};
+        await this.commitAssets(next);
+    }
+    /** Atomically persist preference + debit account settings in one encrypted assets write. */
+    async setCardConfiguration(preferences, debits) {
+        if (!this.key)
+            throw new Error('OneDrive保管庫を解除してください。');
+        const next = clone(this.assetsDocument);
+        const cleanPrefs = validateCardPreferences(preferences) ?? {};
+        const cleanDebits = validateCardDebitAccounts(debits) ?? {};
+        if (next.mizuhoTransferPlan?.enabled && cleanDebits['rakuten-mizuho'] !== 'mizuho-bank')
+            throw new Error('送金予測が有効です。みずほ楽天カードの引落口座は「みずほ銀行」を選んでください。');
+        next.cardPreferences = cleanPrefs;
+        next.cardDebitAccounts = cleanDebits;
+        await this.commitAssets(next);
+    }
+    async setCardPreferences(value) {
+        if (!this.key)
+            throw new Error('OneDrive保管庫を解除してください。');
+        const next = clone(this.assetsDocument);
+        next.cardPreferences = validateCardPreferences(value) ?? {};
+        await this.commitAssets(next);
+    }
+    /** Analysis-only metadata; never inserted into the bank recurring schedule. */
+    async setCardRecurringDecision(key, decision) {
+        if (!this.key || this.rotating)
+            throw new Error('OneDrive保管庫を解除してください。');
+        const next = clone(this.assetsDocument);
+        const changes = { ...(next.cardRecurringDecisions ?? {}) };
+        if (decision) {
+            const validated = validateCardRecurringDecisions({ [key]: decision });
+            changes[key] = validated[key];
+        }
+        else {
+            if (!Object.prototype.hasOwnProperty.call(changes, key))
+                return;
+            delete changes[key];
+        }
+        next.cardRecurringDecisions = changes;
         await this.commitAssets(next);
     }
     async deleteRecurring(id) {
@@ -972,7 +1105,7 @@ export class LiveVault {
         try {
             // First put records into their destinations; only afterwards tombstone old-year copies.
             for (const [year, updated] of changes) {
-                await this.commitYear(year, updated);
+                await this.commitYear(year, updated, new Set(ids));
                 committedYears++;
             }
             for (const move of moves) {
@@ -1126,7 +1259,7 @@ export class LiveVault {
         }
         throw new Error('OneDrive索引の同時更新が続いています。再試行してください。');
     }
-    async commitYear(year, changed) {
+    async commitYear(year, changed, protectedIds = new Set()) {
         if (!this.key)
             throw new Error('保管庫はロックされています。');
         const base = clone(this.shards.get(year)?.document ?? emptyDocument());
@@ -1146,6 +1279,9 @@ export class LiveVault {
             const collisions = detectDocumentEditCollisions(base, changed, latest);
             await this.approveCollision(collisions, this.statementConflictResolver, 'カード明細');
             const merged = mergeDocuments(base, changed, latest, new Date().toISOString(), undefined, collisions.length > 0);
+            const duplicates = duplicateStatementMonths(merged.records, protectedIds);
+            if (duplicates.length)
+                throw new CloudEditCancelledError(`同じカード・請求月の明細がOneDrive側で重複しています（${duplicates.join('、')}）。最新データを取得し、差し替え先を確認してください。`);
             try {
                 const result = await this.client.writeYearVault(year, await encryptDocument(merged, this.key, this.salt), remote ? { id: remote.id, etag: remote.etag } : null);
                 if (result?.id && result.etag) {

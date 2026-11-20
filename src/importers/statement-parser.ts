@@ -47,12 +47,9 @@ function parseRakuten(text: string, rows: ImportRow[]): { cardId: string | null;
       previous.description = line; // ETC toll road / segment notes on next line.
     }
   }
-  // Detect card type from the actual transaction description, without embedding
-  // card-number fragments in a potentially public static app.
-  const allEtc = rows.length > 0 && rows.every(row => /ETCカード売上/.test(row.merchant));
-  const noEtc = rows.length > 0 && rows.every(row => !/ETCカード売上/.test(row.merchant));
-  const cardId = allEtc ? 'rakuten-etc' : noEtc ? 'rakuten-mizuho' : null;
-  return { cardId, paymentDate: date, statedTotal: total, billingMonth: billingMonth ?? paymentMonth(date) };
+  // ETC purchases do not identify which of the two Rakuten cards was used.
+  // Require an explicit choice before the new statement can be saved.
+  return { cardId: null, paymentDate: date, statedTotal: total, billingMonth: billingMonth ?? paymentMonth(date) };
 }
 
 function parseJcb(text: string, rows: ImportRow[]) {
@@ -103,12 +100,10 @@ function parseSmbc(text: string, rows: ImportRow[], candidateRows: string[][]) {
     const m = /^(\d{2})\/(\d{2})\/(\d{2})\s+(.+?)\s+(?:ご本人|本人)\s+(?:\d+回払い|リボ払い|分割払い)\s+(?:(?:\d{2}\/\d{2})\s+)?([-−]?[\d,]+)(?:\s|$)/.exec(flat);
     if (m) addRow(rows, isoDate(+m[1]!, +m[2]!, +m[3]!), m[4]!, parseYen(m[5]!), i + 1);
   }
-  // In this personal workflow, Amazon purchases in the statement identify the
-  // Amazon-branded card; otherwise the Vpass statement is the NL card.
-  // The card selector remains editable if this heuristic ever misidentifies one.
-  const amazonStatement = rows.some(row => /AMAZON|アマゾン/i.test(normalize(row.merchant)));
-  const cardId = rows.length ? (amazonStatement ? 'amazon' : 'smbc-nl') : null;
-  return { cardId, paymentDate: date, billingMonth: paymentMonth(date), statedTotal: total };
+  // Vpass PDFs and pasted statements have no reliable issuer/card identifier.
+  // Merchants (including Amazon) must NEVER determine the payment card.
+  // CSV imports use their own explicit issuer-based identification path.
+  return { cardId: null, paymentDate: date, billingMonth: paymentMonth(date), statedTotal: total };
 }
 
 function parseGold(text: string, rows: ImportRow[], candidateRows: string[][]) {
@@ -168,8 +163,7 @@ export function parseStatementText(raw: string, sourceKind: SourceKind, sourceNa
     default: data = { cardId: null, paymentDate: null, statedTotal: null, billingMonth: null };
   }
   if (provider === 'unknown') warnings.push('カード会社の明細形式を特定できませんでした。対応形式か確認してください。');
-  if (provider === 'smbc' && data.cardId) warnings.push('Vpassのカード名は利用先から推定しました。別のカードの場合はカード欄で変更してください。');
-  if (provider === 'rakuten' && !data.cardId) warnings.push('楽天カードの種類を特定できませんでした。対象カードを選択してください。');
+  // Rakuten/みずほ selection is an ordinary required user action, not a parsing warning.
   if (rows.length === 0) warnings.push(sourceKind === 'pdf' ? '明細の行を抽出できませんでした。画像化されたPDFの場合はWeb明細のコピーを貼り付けてください。' : '取引行を抽出できませんでした。Web画面の表全体をコピーして貼り付けてください。');
   if (!data.billingMonth) warnings.push('請求月を特定できませんでした。');
   if (data.statedTotal === null) warnings.push('請求総額を特定できませんでした。');

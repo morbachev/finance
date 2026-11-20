@@ -177,3 +177,21 @@ test('stale device updating an independent balance cannot erase newly enabled NI
   assert.equal(first.assetSettings().nisaCardRule.merchantContains,'楽天証券');
   assert.equal(first.assetSettings().snapshots.length,1);
 });
+
+test('LiveVault keeps NISA rule history encrypted and restores it after refresh and re-unlock',async()=>{
+  const store=new Map();
+  const first=new LiveVault(new FakeGraph(store));await first.create(secret);
+  await first.setNisaCardRule({cardId:'smbc-nl',merchantContains:'RAKUTEN SECURITIES',enabled:true},'2026-11-20');
+  await first.setNisaCardRule({cardId:'amazon',merchantContains:'INVEST',enabled:true},'2026-11-21');
+  const original=first.assetSettings();
+  assert.equal(original.nisaCardRuleHistory[0].effectiveOn,'2026-11-22');
+  assert.equal(original.nisaCardRuleHistory[0].previous.cardId,'smbc-nl');
+  assert.equal(store.get('assets').text.includes('RAKUTEN SECURITIES'),false);
+  const second=new LiveVault(new FakeGraph(store));await second.unlock(secret);
+  assert.deepEqual(second.assetSettings().nisaCardRuleHistory,original.nisaCardRuleHistory);
+  await second.setNisaCardRule(null,'2026-11-22');
+  await first.refresh();
+  assert.equal(first.assetSettings().nisaCardRule,null);
+  assert.equal(first.assetSettings().nisaCardRuleHistory.length,2);
+  assert.equal(first.assetSettings().nisaCardRuleHistory[1].previous.cardId,'amazon');
+});

@@ -117,3 +117,19 @@ export function detectDocumentEditCollisions(base:CloudDocument,local:CloudDocum
   mergeDocuments(base,local,remote,new Date().toISOString(),collisions);
   return collisions;
 }
+
+/** Guard at the final merged OneDrive document, not just the import screen.
+ * An independently added record in another browser tab must not double-count a bill. */
+export function duplicateStatementMonths(records:readonly CloudRecord[],protectedIds:ReadonlySet<string>):string[] {
+  const target=new Set(records.filter(r=>protectedIds.has(r.id)&&r.statement.cardId&&r.statement.billingMonth)
+    .map(r=>`${r.statement.cardId}|${r.statement.billingMonth}`));
+  if(!target.size)return [];
+  const seen=new Set<string>(),duplicates=new Set<string>();
+  for(const record of records){
+    if(!record.statement.cardId||!record.statement.billingMonth)continue;
+    const key=`${record.statement.cardId}|${record.statement.billingMonth}`;
+    if(!target.has(key))continue;
+    if(seen.has(key))duplicates.add(key);else seen.add(key);
+  }
+  return [...duplicates];
+}

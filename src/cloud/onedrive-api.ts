@@ -461,6 +461,26 @@ export class OneDriveTestClient {
   async writeAssetSettings(text:string,existing:{id:string;etag:string}|null):Promise<{id:string;etag:string}|null> {
     return this.writeNamedFile(this.financeDataPath('settings'),'assets.enc',text,existing,2_000_000);
   }
+  /** Only strict YYYY-MM encrypted report files are accepted in this generation. */
+  async listMonthlyReports():Promise<Array<{period:string;id:string;etag:string}>> {
+    const parent=await this.folderPath(this.financeDataPath('reports'),false);
+    if(!parent)return [];
+    const r=await this.graph(`/me/drive/items/${encodeURIComponent(parent)}/children?$select=id,name,eTag&$top=400`);
+    const json=await r.json() as {value?:DriveItem[];'@odata.nextLink'?:string};
+    if(json['@odata.nextLink']||!Array.isArray(json.value))throw new Error('レポート一覧をすべて取得できませんでした。');
+    const found=json.value.filter(item=>/^(19|20|21)\d{2}-(0[1-9]|1[0-2])\.enc$/.test(item.name??''));
+    if(found.some(item=>!item.id||!item.eTag)||new Set(found.map(x=>x.name)).size!==found.length)
+      throw new Error('レポート一覧が不正です。');
+    return found.map(item=>({period:item.name!.slice(0,-4),id:item.id,etag:item.eTag!})).sort((a,b)=>b.period.localeCompare(a.period));
+  }
+  async readMonthlyReport(period:string):Promise<{text:string;id:string;etag:string}|null> {
+    if(!/^(19|20|21)\d{2}-(0[1-9]|1[0-2])$/.test(period))throw new Error('年月が不正です。');
+    return this.readNamedFile(this.financeDataPath('reports'),`${period}.enc`,2_000_000);
+  }
+  async writeMonthlyReport(period:string,text:string,existing:{id:string;etag:string}|null):Promise<{id:string;etag:string}|null> {
+    if(!/^(19|20|21)\d{2}-(0[1-9]|1[0-2])$/.test(period))throw new Error('年月が不正です。');
+    return this.writeNamedFile(this.financeDataPath('reports'),`${period}.enc`,text,existing,2_000_000);
+  }
   /** One listing provides both year discovery and ETags, so unchanged years need no download. */
   async listYearFiles():Promise<Array<{year:string;id:string;etag:string}>> {
     const parent=await this.folderPath(this.financeDataPath('statements'),false);

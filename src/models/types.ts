@@ -1,5 +1,5 @@
 export type Provider = 'rakuten' | 'jcb' | 'view' | 'smbc' | 'goldpoint' | 'unknown';
-export type SourceKind = 'pdf' | 'paste';
+export type SourceKind = 'pdf' | 'paste' | 'csv';
 export type ConfirmationState = 'confirmed' | 'provisional' | 'unknown';
 
 export interface CardDefinition {
@@ -10,7 +10,7 @@ export interface CardDefinition {
 
 export const CARDS: readonly CardDefinition[] = [
   { id: 'rakuten-mizuho', name: 'みずほ楽天カード', provider: 'rakuten' },
-  { id: 'rakuten-etc', name: '楽天カード（ETC利用分）', provider: 'rakuten' },
+  { id: 'rakuten-etc', name: '楽天カード', provider: 'rakuten' },
   { id: 'recruit-jcb', name: 'リクルートカード（JCB）', provider: 'jcb' },
   { id: 'bic-suica', name: 'ビックカメラSuicaカード', provider: 'view' },
   { id: 'smbc-nl', name: '三井住友カード NL', provider: 'smbc' },

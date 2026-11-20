@@ -1,0 +1,68 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { webcrypto } from 'node:crypto';
+import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, cpSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { verifyLegacyMigration, verifyDownloadedBackup } from '../dist/src/storage/legacy-cleanup.js';
+if(!globalThis.crypto)globalThis.crypto=webcrypto;
+const statement=(amount=100)=>({provider:'rakuten',cardId:'rakuten-mizuho',sourceKind:'pdf',sourceName:'statement.pdf',billingMonth:'2026-10',paymentDate:'2026-11-27',statedTotal:amount,confirmation:'confirmed',warnings:[],rows:[{id:'row',usedOn:'2026-10-01',merchant:'TEST',amount}]});
+const legacy=[{id:'id-a',statement:statement(),hasSource:true}];
+const cloud=[{id:'id-a',statement:statement()}];
+const bytes=new Uint8Array([1,2,3,4]);
+test('legacy cleanup requires exact statement and PDF source comparison',async()=>{
+  assert.deepEqual(await verifyLegacyMigration(legacy,cloud,async()=>bytes,async()=>bytes),{statementCount:1,sourceCount:1});
+  await assert.rejects(verifyLegacyMigration(legacy,[],async()=>bytes,async()=>bytes),/未移行/);
+  await assert.rejects(verifyLegacyMigration(legacy,[{id:'id-a',statement:statement(999)}],async()=>bytes,async()=>bytes),/一致しません/);
+  await assert.rejects(verifyLegacyMigration(legacy,cloud,async()=>bytes,async()=>new Uint8Array([1,2,9,4])),/原本/);
+  await assert.rejects(verifyLegacyMigration(legacy,cloud,async()=>bytes,async()=>null),/原本/);
+});
+test('backup selection needs a cryptographically identical exported file',async()=>{
+  assert.equal(await verifyDownloadedBackup(new Blob(['secret-cipher']),new Blob(['secret-cipher'])),true);
+  assert.equal(await verifyDownloadedBackup(new Blob(['secret-cipher']),new Blob(['secret-CIPHER'])),false);
+  assert.equal(await verifyDownloadedBackup(new Blob(['secret-cipher']),new Blob([''])),false);
+});
+test('legacy cleanup is only available from an explicit settings flow',()=>{
+  const html=readFileSync('public/index.html','utf8');const main=readFileSync('src/main.ts','utf8');
+  assert.match(html,/id="cloud-legacy-cleanup"/);
+  assert.match(html,/id="legacy-cleanup-dialog"/);
+  assert.match(main,/await verifyDownloadedBackup\(backup,backupInput.files\[0\]\)/);
+  assert.match(main,/await compare\(\)/);assert.match(main,/if\(!window.confirm/);assert.ok(main.includes("JSON.stringify(exported)!==JSON.stringify(current)"));
+  assert.match(main,/await deleteLegacyVault\(\)/);
+  assert.match(main,/if\(!await hasVault\(\)\)/);
+  assert.match(readFileSync('src/storage/encrypted-vault.ts','utf8'),/indexedDB.deleteDatabase\(DB_NAME\)/);
+});
+test('all major sections and connection status share one outer gutter',()=>{
+  const css=readFileSync('public/styles/layout-v172.css','utf8');
+  assert.match(css,/workspace > \.content/);
+  assert.match(css,/#cloud-live-bar,#operation-result/);
+  for(const id of ['#home-view','#summary-view','#manage-view','#settings-view'])assert.ok(css.includes(id));
+  assert.match(readFileSync('public/index.html','utf8'),/styles\/layout-v172.css/);
+});
+test('GitHub Pages deploy depends on full-history Gitleaks and custom scan',()=>{
+  const yml=readFileSync('.github/workflows/pages.yml','utf8');
+  assert.match(yml,/needs: security/);
+  assert.match(yml,/fetch-depth: 0/);
+  assert.match(yml,/node scripts\/audit-publication.mjs --tree/);
+  assert.match(yml,/ghcr.io\/gitleaks\/gitleaks@sha256:/);
+  const hook=readFileSync('.githooks/pre-commit','utf8');
+  assert.match(hook,/audit-publication.mjs --staged/);
+  assert.match(hook,/gitleaks git --pre-commit --staged/);
+});
+test('publication audit blocks forbidden staged documents and personal email',()=>{
+  const cwd=mkdtempSync(join(tmpdir(),'finance-v172-security-'));
+  const git=(...args)=>execFileSync('git',args,{cwd,encoding:'utf8'});
+  git('init','-q');git('config','user.name','Morbee');git('config','user.email','114388961+morbachev@users.noreply.github.com');
+  mkdirSync(join(cwd,'scripts'));cpSync('scripts/audit-publication.mjs',join(cwd,'scripts/audit-publication.mjs'));
+  cpSync('scripts/publication-policy.json',join(cwd,'scripts/publication-policy.json'));
+  writeFileSync(join(cwd,'package.json'),'{"type":"module"}');
+  writeFileSync(join(cwd,'README.md'),'hello');git('add','README.md');git('commit','-qm','test baseline');
+  writeFileSync(join(cwd,'secret.pdf'),'fake.pdf');git('add','secret.pdf');
+  let result=spawnSync(process.execPath,['scripts/audit-publication.mjs','--staged'],{cwd,encoding:'utf8'});
+  assert.notEqual(result.status,0);assert.match(result.stderr,/secret.pdf/);
+  git('reset','-q');const privateEmail=['customer','example.invalid'].join('@');writeFileSync(join(cwd,'note.md'),privateEmail);git('add','note.md');
+  result=spawnSync(process.execPath,['scripts/audit-publication.mjs','--staged'],{cwd,encoding:'utf8'});
+  assert.notEqual(result.status,0);assert.match(result.stderr,/個人メールアドレス/);
+  assert.ok(!result.stderr.includes(privateEmail),'never print the detected value');
+});

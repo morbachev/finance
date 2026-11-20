@@ -1,0 +1,73 @@
+/* Shared card points. Each card retains its own rate, even for annual totals. */
+.points-benefits{min-width:0;padding:17px 19px;display:grid;gap:11px}
+.points-benefits-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.points-benefits-heading h2{font-size:15px;margin:0;color:var(--ink)}
+.points-benefits-heading>strong{font-size:clamp(19px,2.4vw,26px);color:var(--accent);font-variant-numeric:tabular-nums}
+.points-benefits-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(210px,100%),1fr));gap:8px}
+.points-benefits-row{min-width:0;display:flex;align-items:center;justify-content:space-between;gap:10px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--bg)}
+.points-benefits-card{display:flex;flex-direction:column;gap:4px;min-width:0}
+.points-benefits-card>span{font-size:12px;font-weight:700;color:var(--ink);overflow-wrap:anywhere}
+.points-benefits-card>small{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.points-benefits-row>strong{font-size:14px;color:var(--accent);font-variant-numeric:tabular-nums;white-space:nowrap}
+.points-benefits-empty{font-size:12px;color:var(--muted)}
+#manage-view .manage-statement-points{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:10px 13px;margin:-6px 0 15px;border:1px solid var(--line);border-radius:9px;background:var(--bg)}
+#manage-view .manage-statement-points span{font-size:12px;color:var(--muted);font-weight:650}
+#manage-view .manage-statement-points strong{font-size:17px;color:var(--accent);font-variant-numeric:tabular-nums}
+#manage-view .manage-editor .transaction-table{min-width:680px}
+#manage-view .manage-editor .transaction-table .col-date{width:132px}
+#manage-view .manage-editor .transaction-table .col-merchant{width:auto}
+#manage-view .manage-editor .transaction-table .col-amount{width:122px}
+#manage-view .manage-editor .transaction-table .col-note{width:145px}
+#manage-view .manage-editor .transaction-table .col-operation{width:64px}
+#manage-view .manage-editor .transaction-table td[data-label="利用日"] input{width:116px;max-width:100%;box-sizing:border-box}
+/* Expanded import workspace has exactly one vertical viewport and independent column scrolling. */
+#entry-accordion{flex:0 0 auto;min-width:0;position:relative}
+#entry-accordion>.import-panel{min-height:0!important;padding:13px 17px 12px!important;margin-bottom:12px}
+#entry-accordion .import-method .dropzone{height:92px;min-height:92px;padding:8px 12px}
+#entry-accordion .import-method .drop-icon{width:27px;height:27px;font-size:18px;margin:0}
+#entry-accordion .import-method .hint{font-size:10px;line-height:1.45;min-height:0;margin-top:5px}
+@media(max-width:800px){#entry-accordion>.import-panel{padding:15px!important}}
+#entry-accordion>summary{display:none}
+#import-view.has-import-drafts:not(.hidden){height:100%!important;min-height:0!important;display:flex!important;flex-direction:column!important;overflow:hidden!important}
+.workspace .content:has(#import-view.has-import-drafts:not(.hidden)){overflow:hidden!important;padding-bottom:12px!important}
+#import-view.has-import-drafts>#entry-accordion{order:1!important;margin-bottom:10px}
+#import-view.has-import-drafts #entry-accordion>summary{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--panel);border:1px solid var(--line);border-radius:10px;cursor:pointer;font-size:12px;font-weight:700;list-style:none;color:var(--ink)}
+#import-view.has-import-drafts #entry-accordion>summary::-webkit-details-marker{display:none}
+#import-view.has-import-drafts #entry-accordion>summary::after{content:'⌄';font-size:19px;line-height:1;color:var(--muted);transition:transform .15s}
+#import-view.has-import-drafts #entry-accordion[open]>summary::after{transform:rotate(180deg)}
+#import-view.has-import-drafts #entry-accordion[open]>.import-panel{
+ position:absolute;z-index:5;top:calc(100% + 6px);left:0;right:0;
+ max-height:min(480px,62dvh);min-height:0!important;overflow:auto!important;
+ margin:0!important;box-shadow:0 12px 32px #09182b33
+}
+#import-view.has-import-drafts>.results-grid{order:2!important;flex:1 1 auto!important;min-height:0!important;max-height:100%!important;height:auto!important;overflow:hidden!important;align-items:stretch!important}
+#import-view.has-import-drafts .results-grid>.statement-index-panel,
+#import-view.has-import-drafts .results-grid>.detail-panel{display:flex!important;flex-direction:column!important;align-self:stretch!important;min-height:0!important;height:100%!important;overflow:hidden!important}
+#import-view.has-import-drafts .statement-index-panel>.statement-list{flex:1 1 auto!important;min-height:0!important;height:auto!important;max-height:none!important;overflow-y:auto!important;overscroll-behavior:contain!important}
+#import-view.has-import-drafts .detail-panel #preview-content:not(.hidden){display:flex!important;flex:1 1 auto!important;flex-direction:column!important;min-height:0!important;height:100%!important;overflow:hidden!important}
+#import-view.has-import-drafts .detail-panel .detail-summary-block{flex:0 1 auto;max-height:48%;overflow:auto;scrollbar-gutter:stable}
+#import-view.has-import-drafts .detail-panel .transactions-panel-inner{display:flex!important;flex-direction:column!important;flex:1 1 auto!important;min-height:0!important;height:100%!important;overflow:hidden!important}
+#import-view.has-import-drafts .transactions-panel-inner>.table-scroll{display:block!important;flex:1 1 0!important;min-height:0!important;height:auto!important;max-height:none!important;overflow:auto!important;overscroll-behavior:contain;scrollbar-gutter:stable}
+#import-view.has-import-drafts .transactions-panel-inner .transaction-table thead{position:sticky;top:0;z-index:1;background:var(--panel)}
+#import-view.has-import-drafts .batch-bar{order:3!important;flex:0 0 auto!important;position:static!important;z-index:2;margin:10px 0 0!important}
+@media(min-width:981px){
+ #import-view.has-import-drafts:not(.hidden){min-height:0!important;height:100%!important}
+ #import-view.has-import-drafts>.results-grid{order:2!important;flex:1 1 auto!important;min-height:0!important}
+ #import-view.has-import-drafts .results-grid>.statement-index-panel,#import-view.has-import-drafts .results-grid>.detail-panel{height:100%!important;min-height:0!important;overflow:hidden!important}
+}
+@media(max-width:980px){
+ #import-view.has-import-drafts>.results-grid{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,35fr) minmax(0,65fr);gap:10px}
+ #import-view.has-import-drafts .results-grid>.statement-index-panel,#import-view.has-import-drafts .results-grid>.detail-panel{min-height:0!important}
+}
+@media(max-width:800px){
+ body:has(#import-view.has-import-drafts:not(.hidden)){height:100dvh!important;overflow:hidden!important}
+ .app-shell:has(#import-view.has-import-drafts:not(.hidden)){height:100dvh!important;display:flex!important;flex-direction:column!important;overflow:hidden!important}
+ #finance-sidebar.sidebar{flex:0 0 auto!important;min-height:0!important;height:auto!important}
+ .workspace:has(#import-view.has-import-drafts:not(.hidden)){height:auto!important;flex:1 1 0!important;min-height:0!important;overflow:hidden!important}
+ .workspace .content:has(#import-view.has-import-drafts:not(.hidden)){height:100%!important;flex:1 1 0!important;min-height:0!important;overflow:hidden!important}
+ #import-view.has-import-drafts:not(.hidden){height:100%!important;min-height:0!important}
+ .workspace:has(#import-view.has-import-drafts:not(.hidden)) footer{display:none!important}
+ #import-view.has-import-drafts>.results-grid{grid-template-rows:minmax(0,35fr) minmax(0,65fr)}
+ #import-view.has-import-drafts .detail-summary-block{padding:13px}
+ #import-view.has-import-drafts .batch-bar{flex-wrap:wrap}
+}

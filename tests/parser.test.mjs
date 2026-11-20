@@ -6,9 +6,9 @@ import { planStatementImport, statementSignature } from '../dist/src/importers/i
 const run = text => parseStatementText(text, 'paste', '架空のテスト明細');
 const total = statement => statement.rows.reduce((sum, row) => sum + row.amount, 0);
 
-test('SMBC: provisional amount, billing month, two rows, Amazon auto-detected', () => {
+test('SMBC: Amazon purchases do not identify the Vpass card', () => {
   const statement = run(`三井住友カード\n# 2026年12月28日お支払い分のご利用明細\n2026年11月14日現在判明分\n2026年12月 支払い予定分のご利用明細合計\n**643円**\n| ご利用日 | ご利用店名 | カード | 支払区分 | 分割回数 | 支払予定月 | ご利用金額 |\n| 26/11/10 | ＡＭＡＺＯＮ．ＣＯ．ＪＰ | ご本人 | 1回払い | | 26/12 | 258 |\n| 26/11/02 | ＡＭＡＺＯＮ．ＣＯ．ＪＰ | ご本人 | 1回払い | | 26/12 | 385 |`);
-  assert.equal(statement.provider, 'smbc'); assert.equal(statement.cardId, 'amazon');
+  assert.equal(statement.provider, 'smbc'); assert.equal(statement.cardId, null);
   assert.equal(statement.paymentDate, '2026-12-28'); assert.equal(statement.billingMonth, '2026-12');
   assert.equal(statement.confirmation, 'provisional'); assert.equal(statement.statedTotal, 643);
   assert.equal(statement.rows.length, 2); assert.equal(total(statement), 643);
@@ -24,7 +24,7 @@ test('GOLD POINT: shifted Markdown row and final amount', () => {
 
 test('Rakuten: header is split over two lines, ETC memo belongs to preceding row', () => {
   const statement = run(`楽天カード株式会社\n2026年11月ご請求金額 ご利用カード\n2,940円 楽天カード（Visa） ****-****-****-4354\nお支払日 返済方法 引落口座\n2026/11/27 口座振替\n利用日 利用店名 利用者 支払方法 利用金額 手数料/利息 支払総額 当月支払額 当月請求額 翌月繰越残高\n2026/10/03 ETCカード売上 ETC* 1回払い 320 0 320 320 320 0\nトンネルA 出口B\n2026/10/03 ETCカード売上 ETC* 1回払い 670 0 670 670 670 0\n区間C 出口D\n2026/09/26 ETCカード売上 ETC* 1回払い 1,950 0 1,950 1,950 1,950 0\n※お支払金額確定前の明細になります。`);
-  assert.equal(statement.cardId, 'rakuten-etc'); assert.equal(statement.billingMonth, '2026-11');
+  assert.equal(statement.cardId, null); assert.equal(statement.billingMonth, '2026-11');
   assert.equal(statement.statedTotal, 2940); assert.equal(statement.rows.length, 3);
   assert.equal(total(statement), 2940);
   assert.match(statement.rows[0].description, /トンネルA/);
@@ -50,7 +50,7 @@ test('Unknown template must not silently pretend to be valid', () => {
 });
 
 
-test('SMBC: ordinary Vpass rows default to NL, not Amazon', () => {
+test('SMBC: merchant names without Amazon do not identify NL either', () => {
   const statement = run(`三井住友カード
 # 2026年12月28日お支払い分のご利用明細
 2026年11月14日現在判明分
@@ -59,7 +59,7 @@ test('SMBC: ordinary Vpass rows default to NL, not Amazon', () => {
 | ご利用日 | ご利用店名 | カード | 支払区分 | 分割回数 | 支払予定月 | ご利用金額 |
 | 26/11/06 | マクドナルド | ご本人 | 1回払い | | 26/12 | 500 |
 | 26/11/04 | ローソン | ご本人 | 1回払い | | 26/12 | 138 |`);
-  assert.equal(statement.cardId, 'smbc-nl');
+  assert.equal(statement.cardId, null);
   assert.equal(statement.rows.length, 2);
   assert.equal(total(statement), 638);
 });
@@ -87,6 +87,9 @@ test('Import policy: a changed amount for the same card/month is a revision', ()
 2026年12月 支払い予定分のご利用明細合計
 **200円**
 | 26/11/10 | テスト店 | ご本人 | 1回払い | | 26/12 | 200 |`);
+  // Revisions can only be resolved after the user has selected the card.
+  a.cardId = 'smbc-nl';
+  b.cardId = 'smbc-nl';
   assert.deepEqual(planStatementImport([a], b), { kind: 'revision', index: 0 });
 });
 
@@ -101,6 +104,9 @@ test('Import policy: different cards with the same month are not combined', () =
 2026年12月 支払い予定分のご利用明細合計
 **100円**
 | 26/11/10 | ローソン | ご本人 | 1回払い | | 26/12 | 100 |`);
+  // Both cards were explicitly selected after the ambiguous Vpass parse.
+  nl.cardId = 'smbc-nl';
+  amazon.cardId = 'amazon';
   assert.deepEqual(planStatementImport([nl], amazon), { kind: 'add' });
 });
 

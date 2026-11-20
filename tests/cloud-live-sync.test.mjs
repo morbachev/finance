@@ -314,3 +314,20 @@ test('v1.6.16: definitively rejected first-year write is not treated as partial 
   await assert.rejects(a.saveBatch([{id:'not-committed',statement:statement('2025-10')}]),error=>error instanceof GraphError&&error.status===403);
   assert.equal(a.hasPendingYearBatch,false);
 });
+
+test('CSV v1.9.2: simultaneous independent IDs for the same card/month are rejected at OneDrive commit',async()=>{
+  const [a,b,mock]=drivers();
+  await a.create(secret);await b.unlock(secret);
+  await a.saveBatch([{id:'text-original',statement:{...statement('2026-11','テキスト明細'),cardId:'smbc-nl',provider:'smbc'}}]);
+  await assert.rejects(
+    b.saveBatch([{id:'different-id',statement:{...statement('2026-11','CSV明細'),cardId:'smbc-nl',provider:'smbc',sourceKind:'csv'}}]),
+    /同じカード・請求月/,
+  );
+  const fresh=new LiveVault(mock);await fresh.unlock(secret);
+  assert.deepEqual(fresh.records().map(record=>record.id),['text-original']);
+  // A legitimate same-ID revision is still allowed and remains one record.
+  await a.saveBatch([{id:'text-original',statement:{...a.records()[0].statement,sourceKind:'csv'}}]);
+  await fresh.refresh();
+  assert.equal(fresh.records().length,1);
+  assert.equal(fresh.records()[0].statement.sourceKind,'csv');
+});

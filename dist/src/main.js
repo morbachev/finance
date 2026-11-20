@@ -1,13 +1,17 @@
 import { CARDS, calculatedTotal, getCard } from './models/types.js';
 import { parseStatementText } from './importers/statement-parser.js';
 import { parsePdfFile } from './importers/pdf-reader.js';
+import { decodeCardCsv, identifyCardCsv, parseCardCsv } from './importers/card-csv.js';
+import { cardPaymentDate } from './importers/payment-date.js';
+import { prepareStatementRevision } from './importers/revision-review.js';
 import { planStatementImport, statementSignature } from './importers/import-policy.js';
-import { hasVault, unlockVault, readStatements, readOriginal } from './storage/encrypted-vault.js';
+import { hasVault, unlockVault, readStatements, readOriginal, exportEncryptedBackup, deleteLegacyVault, lockVault } from './storage/encrypted-vault.js';
+import { verifyLegacyMigration, verifyDownloadedBackup } from './storage/legacy-cleanup.js';
 import { graphClientWithoutRedirect, initCloudSettings, cloudConnectPrompt } from './cloud/cloud-settings.js';
 import { LiveVault, CloudWriteUncertainError } from './cloud/live-vault.js';
 import { clearTabSession, readTabSession, saveTabSession } from './cloud/tab-session.js';
 import { displayMerchant, matchingRule, sortedRules, normalizeMerchant, PALETTE } from './cloud/merchant-rules.js';
-import { importErrors, duplicateMonths } from './importers/batch-policy.js';
+import { importErrors, importDisplayErrors, cardSelectionPending, duplicateMonths } from './importers/batch-policy.js';
 import { prioritizedIndices, orderedPreviewRows } from './ui/preview-order.js';
 import { calendarBillingPeriod, filteredStatementIndices } from './ui/manage-filter.js';
 import { recentMerchants } from './ui/recent-merchants.js';
@@ -18,6 +22,14 @@ import { canonicalStatementFilename } from './ui/statement-filename.js';
 import { initMonthlySummary } from './ui/monthly-summary.js'; /* finance-monthly-v140 */
 import { initPasswordFields, hidePasswordField, clearPasswordField } from './ui/password-fields.js';
 import { readLastView, saveLastView } from './ui/view-preference.js';
+import { initHome } from './ui/home.js';
+import { initAnalysis } from './ui/analysis.js';
+import { analysisDrilldownMatches, analysisDrilldownBreakdown, drilldownPeriodLabel } from './ui/analysis-drilldown.js';
+import { initMonthlyReports } from './ui/monthly-reports.js';
+import { initSubscriptions } from './ui/subscriptions.js';
+import { initCardSettings } from './ui/card-settings.js';
+import { showActivity, simpleActivity, finishActivity } from './ui/activity-feedback.js';
+import { statementPoints } from './summary/point-benefits.js';
 const $ = (id) => {
     const node = document.getElementById(id);
     if (!node)
@@ -42,8 +54,12 @@ let liveVault = null;
 let assetsUi = null;
 let futureUi = null;
 let summaryUi = null;
+let homeUi = null;
+let analysisUi = null;
+let reportsUi = null;
+let subscriptionsUi = null;
+let cardSettingsUi = null;
 let currentModal = null;
-let autoSaveTimer;
 let cloudStartupRunning = false;
 let vaultDiscoveryCompleted = false;
 let modalResolve = null;
@@ -51,16 +67,22 @@ let activeIndex = -1;
 let clipboardHtml = '';
 let batchBusy = false;
 let filesBusy = false;
+let revisionBusy = false;
 let previewSort = null;
 let manageSort = null; /* finance-v145 */
 const initialCalendar = calendarBillingPeriod();
 let manageYear = initialCalendar.year;
 let manageMonth = initialCalendar.month;
 let manageReturnToSummary = false;
+let activeAnalysisDrilldown = null;
+let drilldownRows = new Map();
+let analysisSourceProvider = null;
+let analysisReturnPageY = 0;
+let analysisReturnContentY = 0;
+let returnToHome = null;
+let homeNavigationPending = false;
 let summaryReturnPageY = 0;
 let summaryReturnContentY = 0;
-let toastTimeout;
-let operationResultTimeout; /* finance-settings-v144 */
 let lastSavedAt = null;
 let editingRuleId = null;
 let rulesBusy = false;
@@ -75,6 +97,19 @@ function categoryById(id) {
     if (!item)
         return null;
     return { ...item, hex: PALETTE.find(color => color.id === item.color)?.hex ?? '#718096' };
+}
+function cardDisplayName(cardId) {
+    return (cardId && liveVault?.unlocked ? liveVault.assetSettings().cardPreferences?.[cardId]?.name : undefined) ?? getCard(cardId)?.name;
+}
+function refreshCardOptionLabels() {
+    for (const id of ['rule-card', 'recent-merchants-card', 'assets-nisa-card']) {
+        const select = document.getElementById(id);
+        if (!select)
+            continue;
+        for (const option of select.options)
+            if (getCard(option.value))
+                option.textContent = cardDisplayName(option.value);
+    }
 }
 function categoryFor(row, s) {
     const matched = matchingRule(row.merchant, s.cardId, rules());
@@ -106,15 +141,9 @@ function hasUnsavedChanges(s) {
     return !savedIds.has(s) || dirty.has(s) || savedFingerprints.get(s) !== statementWorkingFingerprint(s);
 }
 function markDirty(s) {
+    // Editing only changes the in-memory draft. OneDrive writes require Save.
     dirty.add(s);
     render();
-    // Saved statements are sent to OneDrive shortly after a committed field change.
-    // New imported drafts still require batch confirmation.
-    if (savedIds.has(s)) {
-        if (autoSaveTimer)
-            clearTimeout(autoSaveTimer);
-        autoSaveTimer = setTimeout(() => { void saveEditedStatement(s); }, 450);
-    }
 }
 function dateDisplay(value) { return value ? value.replace(/-/g, '/') : '未取得'; }
 function validDate(value) {
@@ -146,6 +175,14 @@ function issues(s) {
         errors.push('同じカード・請求月が重複しています');
     return errors;
 }
+/** Expected Rakuten/Vpass card choices are not red errors; saving still requires a valid card. */
+function displayIssues(s) {
+    const errors = importDisplayErrors(s, pendingSources.has(s) || originalSaved.has(s));
+    const idx = statements.indexOf(s);
+    if (idx >= 0 && duplicateMonths(statements).has(idx))
+        errors.push('同じカード・請求月が重複しています');
+    return errors;
+}
 function needsReview(s) { return issues(s).length > 0; }
 function pending() { return statements.filter(hasUnsavedChanges); }
 function importQueue() { return statements.filter(s => importStaged.has(s)); }
@@ -153,31 +190,11 @@ function importActive() {
     const statement = active();
     return statement && importStaged.has(statement) ? statement : undefined;
 }
-function toast(text) {
-    const node = $('toast');
-    node.textContent = text;
-    node.classList.add('visible');
-    if (toastTimeout)
-        clearTimeout(toastTimeout);
-    toastTimeout = setTimeout(() => node.classList.remove('visible'), 4500);
-}
+function toast(text) { simpleActivity(text); }
 function operationResult(message, kind = 'good') {
-    const element = $('operation-result');
-    if (operationResultTimeout) {
-        clearTimeout(operationResultTimeout);
-        operationResultTimeout = undefined;
-    }
-    element.className = `operation-result ${kind}`;
-    element.textContent = message;
     if (kind === 'good')
         lastSavedAt = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    // Working state stays until completion; success vanishes. Problems stay long enough to read.
-    if (kind !== 'working') {
-        operationResultTimeout = setTimeout(() => {
-            element.classList.add('hidden');
-            operationResultTimeout = undefined;
-        }, kind === 'good' ? 4800 : kind === 'warn' ? 10000 : 15000);
-    }
+    showActivity(message, kind);
 }
 function sessionStorageSafe() {
     try {
@@ -206,14 +223,14 @@ function div(className, content) {
 /** Shared statement card for the import screen and the management screen. */
 function createStatementEntry(index, withDelete) {
     const statement = statements[index];
-    const state = needsReview(statement) ? 'review' : statement.confirmation === 'provisional' ? 'provisional' : 'verified';
+    const state = displayIssues(statement).length ? 'review' : cardSelectionPending(statement) ? 'selection' : statement.confirmation === 'provisional' ? 'provisional' : 'verified';
     const entry = div(`statement-entry${withDelete ? ' has-delete' : ''}`);
     const item = document.createElement('button');
     item.type = 'button';
     item.className = `statement-card ${state}${index === activeIndex ? ' selected' : ''}`;
     item.setAttribute('aria-pressed', String(index === activeIndex));
     const left = div('statement-main');
-    const name = getCard(statement.cardId)?.name ?? `${providerLabel(statement.provider)}（カード確認）`;
+    const name = cardDisplayName(statement.cardId) ?? `${providerLabel(statement.provider)}（カード確認）`;
     const title = document.createElement('b');
     title.textContent = name;
     const subtitle = document.createElement('small');
@@ -223,7 +240,7 @@ function createStatementEntry(index, withDelete) {
     amount.textContent = yen(statement.statedTotal);
     const flag = document.createElement('span');
     flag.className = `statement-flag ${state}`;
-    flag.textContent = state === 'review' ? '要確認' : state === 'provisional' ? '暫定明細' : '照合OK';
+    flag.textContent = statement.sourceKind === 'csv' && !statement.paymentDate ? '引落日未設定' : state === 'review' ? '要確認' : state === 'selection' ? 'カード選択待ち' : state === 'provisional' ? '暫定明細' : '照合OK';
     // Save state is shown in the batch action / management status, not on every list row.
     right.append(amount, flag);
     left.append(title, subtitle);
@@ -258,6 +275,10 @@ function createStatementEntry(index, withDelete) {
 }
 function buildStatementList() {
     // A completed import is an empty workspace, not a second statement archive.
+    const hasDrafts = importQueue().length > 0 || failedImports.length > 0;
+    $('import-view').classList.toggle('has-import-drafts', hasDrafts);
+    if (!hasDrafts)
+        $('entry-accordion').open = true;
     list.closest('.statement-index-panel')?.classList.toggle('is-empty', !importQueue().length && !failedImports.length);
     $('list-count').textContent = `${importQueue().length + failedImports.length}件`;
     list.replaceChildren();
@@ -318,7 +339,7 @@ async function deleteStatement(index) {
     const statement = statements[index];
     if (!statement)
         return;
-    const name = getCard(statement.cardId)?.name ?? providerLabel(statement.provider);
+    const name = cardDisplayName(statement.cardId) ?? providerLabel(statement.provider);
     const storedId = savedIds.get(statement);
     const message = `${name}（${statement.billingMonth ?? '請求月不明'}）の明細を削除しますか？` +
         (storedId ? '\nOneDriveの解析済み明細を削除します。' +
@@ -383,7 +404,7 @@ function renderCardOptions(s) {
     for (const card of candidates) {
         const option = document.createElement('option');
         option.value = card.id;
-        option.textContent = card.name;
+        option.textContent = cardDisplayName(card.id) ?? card.name;
         cardSelect.append(option);
     }
     cardSelect.value = s.cardId ?? '';
@@ -403,17 +424,33 @@ function renderSummary() {
     }
     previewEmpty.classList.add('hidden');
     previewContent.classList.remove('hidden');
-    $('card-display').textContent = getCard(s.cardId)?.name ?? 'カード未確定';
+    $('card-display').textContent = cardDisplayName(s.cardId) ?? 'カード未確定';
+    $('card-display').classList.toggle('hidden', s.provider === 'rakuten' || s.provider === 'smbc' && s.sourceKind !== 'csv');
+    const rakutenChoice = $('import-rakuten-choice');
+    rakutenChoice.classList.toggle('hidden', s.provider !== 'rakuten');
+    const smbcChoice = $('import-smbc-choice');
+    smbcChoice.classList.toggle('hidden', s.provider !== 'smbc' || s.sourceKind === 'csv');
+    for (const choice of [rakutenChoice, smbcChoice]) {
+        for (const radio of choice.querySelectorAll('input[type=radio]')) {
+            radio.checked = radio.value === s.cardId;
+            radio.disabled = batchBusy || revisionBusy;
+        }
+    }
     $('detail-month').textContent = s.billingMonth ? `${s.billingMonth.slice(0, 4)}年${Number(s.billingMonth.slice(5))}月` : '未取得';
-    $('detail-date').textContent = dateDisplay(s.paymentDate);
+    $('detail-date').textContent = s.sourceKind === 'csv' && !s.paymentDate ? '未設定' : dateDisplay(s.paymentDate);
     $('detail-count').textContent = `${s.rows.length}件`;
     $('amount-stated').textContent = yen(s.statedTotal);
     $('amount-calculated').textContent = yen(calculatedTotal(s));
     const diff = s.statedTotal === null ? null : s.statedTotal - calculatedTotal(s);
     $('amount-diff').textContent = yen(diff);
     $('amount-diff').classList.toggle('negative', diff !== null && diff !== 0);
-    if (needsReview(s))
+    const validationIssues = displayIssues(s);
+    if (s.sourceKind === 'csv' && !s.paymentDate)
+        setBadgeState('pill warn', '引落日未設定');
+    else if (validationIssues.length)
         setBadgeState('pill bad', '要確認');
+    else if (cardSelectionPending(s))
+        setBadgeState('pill info', 'カード選択待ち');
     else if (s.confirmation === 'provisional')
         setBadgeState('pill info', '暫定明細・照合OK');
     else
@@ -423,16 +460,16 @@ function renderSummary() {
     notices.replaceChildren();
     if (!balanced(s) && s.rows.length && s.statedTotal !== null)
         notices.append(notice(`差額が${yen(diff)}あります。金額や未抽出の行を確認してください。`, 'bad'));
-    if (!s.cardId && s.provider !== 'unknown')
-        notices.append(notice('カードを選択してください。別カードの明細に合算しないための確認です。', 'warn'));
     if (s.confirmation === 'provisional')
         notices.append(notice('請求確定前の明細です。確定後に請求額が変わる場合があります。', 'info'));
-    for (const error of issues(s))
+    for (const error of validationIssues) {
+        if (s.sourceKind === 'csv' && !s.paymentDate && error === '支払日が不明または不正です')
+            continue;
         notices.append(notice(error, 'bad'));
+    }
     const fixedWarnings = s.warnings.filter(w => !/請求金額と明細合計に差額|対象カードを選択|カードの種類を特定/.test(w));
     for (const w of fixedWarnings)
-        notices.append(notice(w, needsReview(s) ? 'bad' : 'warn'));
-    $('source-meta').textContent = `${s.sourceKind === 'pdf' ? 'PDF' : 'コピー＆ペースト'} · ${s.sourceKind === 'pdf' ? canonicalStatementFilename(s) : s.sourceName} · 発行元 ${providerLabel(s.provider)}`;
+        notices.append(notice(w, validationIssues.length ? 'bad' : 'warn'));
 }
 function makeInput(value, className, update, ariaLabel) {
     const input = document.createElement('input');
@@ -501,6 +538,7 @@ function renderSortControls() {
                 renderRules();
                 assetsUi?.render();
                 futureUi?.render();
+                cardSettingsUi?.render();
                 operationResult('保存を完了しました。', 'good');
             }
             catch (error) {
@@ -545,12 +583,20 @@ function renderRows() {
             td.title = value;
             tr.append(td);
         }
-        tr.children[1].title = row.merchant !== merchantFor(row, s) ? `元の利用先：${row.merchant}` : row.merchant;
+        // Keep the category badge beside the merchant instead of adding a second line.
+        // Each import-preview row must have one consistent height, regardless of category.
+        const merchantCell = tr.children[1];
+        merchantCell.title = row.merchant !== merchantFor(row, s) ? `元の利用先：${row.merchant}` : row.merchant;
+        const merchantContent = div('preview-merchant-content');
+        const merchantName = div('preview-merchant-name');
+        merchantName.textContent = merchantFor(row, s);
+        merchantContent.append(merchantName);
         const meta = categoryFor(row, s);
         if (meta) {
-            tr.children[1].classList.add('preview-merchant-cell');
-            tr.children[1].append(categoryChip(meta));
+            merchantCell.classList.add('preview-merchant-cell');
+            merchantContent.append(categoryChip(meta));
         }
+        merchantCell.replaceChildren(merchantContent);
         tr.children[2].classList.add('amount-cell');
         tr.children[3].classList.add('note');
         rowBody.append(tr);
@@ -558,20 +604,29 @@ function renderRows() {
 }
 function updateBatchStatus() {
     const drafts = importQueue().filter(hasUnsavedChanges);
-    const errors = importQueue().filter(s => issues(s).length > 0);
-    const errorCount = errors.length + failedImports.length;
+    const blocked = importQueue().filter(s => issues(s).length > 0);
+    const selectionOnly = blocked.filter(s => cardSelectionPending(s) && displayIssues(s).length === 0);
+    const errors = blocked.filter(s => displayIssues(s).length > 0);
+    const errorCount = blocked.length + failedImports.length;
     const button = $('batch-import');
-    button.disabled = !drafts.length || errorCount > 0 || batchBusy || filesBusy;
+    const missingPaymentCards = cardsMissingCsvPayment();
+    const paymentAction = $('import-payment-settings');
+    paymentAction.classList.toggle('hidden', missingPaymentCards.length === 0);
+    button.disabled = !drafts.length || errorCount > 0 || batchBusy || filesBusy || revisionBusy;
     $('clear-all').classList.toggle('hidden', importQueue().length + failedImports.length === 0);
     button.textContent = batchBusy ? 'OneDriveに保存中…' : drafts.length ? `明細 ${drafts.length}件を一括取り込む` : '明細を一括取り込む';
-    $('batch-status').textContent = errorCount
-        ? `${errorCount}件にエラーがあります` : drafts.length ? `${drafts.length}件をまとめて取り込み` : '取込対象はありません';
-    $('batch-description').textContent = errorCount
-        ? 'エラーのある明細は「明細の管理」で修正するか、一覧から除外してください。全件の取込を停止しています。'
-        : drafts.length ? 'この一覧にある取込待ちの明細を、まとめてOneDriveに保存します。'
-            : '新しいPDFやWeb明細を追加してください。保存済みのデータは「明細の管理」で確認できます。';
+    const otherErrors = errors.filter(s => !(s.sourceKind === 'csv' && !s.paymentDate && issues(s).every(e => e === '支払日が不明または不正です'))).length + failedImports.length;
+    $('batch-status').textContent = otherErrors
+        ? `${otherErrors}件に不備があります`
+        : missingPaymentCards.length ? `${missingPaymentCards.length}枚のカードの引落日が未設定`
+            : selectionOnly.length ? `${selectionOnly.length}件のカード選択待ち`
+                : errorCount ? `${errorCount}件に不備があります`
+                    : drafts.length ? `${drafts.length}件をまとめて取り込み` : '取込対象はありません';
+    $('batch-description').textContent = otherErrors ? '不備がある明細は保存できません。' : '';
 }
 function render() {
+    applyCsvPaymentSettings();
+    refreshCardOptionLabels();
     buildStatementList();
     renderSummary();
     renderRows();
@@ -582,6 +637,13 @@ function render() {
         renderRules();
     if (!$('summary-view').classList.contains('hidden'))
         summaryUi?.render();
+    if (!$('home-view').classList.contains('hidden'))
+        homeUi?.render();
+    if (!$('analysis-view').classList.contains('hidden'))
+        analysisUi?.render();
+    if (!$('subscriptions-view').classList.contains('hidden'))
+        subscriptionsUi?.render();
+    // The report page owns its fetched snapshot; avoid refreshing on unrelated edits.
     if (!$('future-view').classList.contains('hidden'))
         futureUi?.render();
 }
@@ -629,6 +691,13 @@ function appendCloudRecordsKeepingDrafts(records) {
     render();
 }
 function updateCloudStatus(message) {
+    if (!liveVault?.unlocked)
+        subscriptionsUi?.reset();
+    if (!liveVault?.unlocked && reportsUi) {
+        reportsUi.reset();
+        if (!$('reports-view').classList.contains('hidden'))
+            reportsUi.render();
+    }
     const label = $('cloud-live-status');
     const bar = $('cloud-live-bar');
     const state = !liveVault ? '未接続' : liveVault.unlocked ? '接続済み' : !vaultDiscoveryCompleted ? '確認中' : liveVault.exists ? 'ロック中' : '保管庫なし';
@@ -637,7 +706,9 @@ function updateCloudStatus(message) {
     label.textContent = state;
     // Keep the global bar quiet when connected. Only missing access or an error needs attention.
     const failure = message && /失敗|エラー|不備|接続してください|未保存|更新確認/.test(message);
-    bar.textContent = failure ? message : liveVault?.unlocked ? '' : `OneDrive：${state}`;
+    bar.textContent = '';
+    if (failure && message)
+        showActivity(message, 'bad');
     $('cloud-live-migrate').classList.toggle('hidden', !liveVault);
     $('cloud-resume-batch').classList.toggle('hidden', !liveVault?.hasPendingYearBatch);
 }
@@ -687,11 +758,11 @@ async function startCloud() {
     vaultDiscoveryCompleted = false;
     // Connecting is a background task. It must not block navigation or silently redirect.
     $('cloud-live-status').textContent = '接続中';
-    $('cloud-live-bar').textContent = 'OneDriveに接続中…';
+    showActivity('OneDriveに接続中…', 'working');
     const slowNotice = setTimeout(() => {
         if (!cloudStartupRunning)
             return;
-        $('cloud-live-bar').textContent = 'OneDriveの接続に時間がかかっています';
+        showActivity('OneDriveの接続に時間がかかっています', 'working');
     }, 12000);
     try {
         const client = await graphClientWithoutRedirect();
@@ -704,8 +775,10 @@ async function startCloud() {
             field: item.field, local: collisionValue(item.local), remote: collisionValue(item.remote) }))));
         assetsUi?.render();
         futureUi?.render();
+        cardSettingsUi?.render();
         const exists = await liveVault.discover();
         vaultDiscoveryCompleted = true;
+        finishActivity('OneDrive');
         updateCloudStatus();
         if (exists) {
             const store = sessionStorageSafe();
@@ -718,6 +791,7 @@ async function startCloud() {
                     renderRules();
                     assetsUi?.render();
                     futureUi?.render();
+                    cardSettingsUi?.render();
                     void assetsUi?.refreshPayroll();
                     updateCloudStatus();
                     operationResult(`このタブの一時鍵で自動復号しました（${liveVault.records().length}件）。`);
@@ -738,6 +812,7 @@ async function startCloud() {
         }
     }
     catch (error) {
+        finishActivity('OneDrive');
         if (!readLastView(sessionStorageSafe()))
             showView('settings');
         updateCloudStatus(`OneDriveに接続してください：${error instanceof Error ? error.message : '接続エラー'}`);
@@ -760,6 +835,8 @@ async function refreshCloud() {
             throw new Error('既存保管庫のロック解除をキャンセルしました。');
         return;
     }
+    if (subscriptionsUi?.isBusy())
+        throw new Error('定期支出の保存が完了してから更新してください。');
     if (pending().length || failedImports.length)
         throw new Error('未保存の明細があります。保存または破棄してから更新してください。');
     replaceCloudRecords(await liveVault.refresh());
@@ -785,6 +862,244 @@ async function migrateLegacy() {
         return;
     await askVault('migrate');
 }
+/** This flow never removes legacy IndexedDB automatically or during migration. */
+function initLegacyCleanup() {
+    const dialog = $('legacy-cleanup-dialog');
+    const status = $('legacy-cleanup-status');
+    const backupButton = $('legacy-cleanup-download');
+    const deleteButton = $('legacy-cleanup-delete');
+    const fileLabel = $('legacy-cleanup-file-label');
+    const backupInput = $('legacy-cleanup-file');
+    const secretInput = $('legacy-cleanup-secret');
+    const checkButton = $('legacy-cleanup-check');
+    let backup = null;
+    let verified = false;
+    let busy = false;
+    const report = (message, error = false) => {
+        status.textContent = message;
+        status.classList.toggle('error', error);
+    };
+    const reset = () => {
+        backup = null;
+        verified = false;
+        deleteButton.disabled = true;
+        deleteButton.classList.add('hidden');
+        backupButton.classList.add('hidden');
+        fileLabel.classList.add('hidden');
+        backupInput.value = '';
+        secretInput.value = '';
+        report('');
+    };
+    const assertSafe = () => {
+        if (!liveVault?.unlocked || !vaultDiscoveryCompleted || liveVault.isRotating || liveVault.hasPendingYearBatch)
+            throw new Error('OneDrive保管庫を解除して、保存を完了してください。');
+        if (pending().length || failedImports.length || assetsUi?.isDirty() || assetsUi?.isBusy() || subscriptionsUi?.isBusy() || cardSettingsUi?.isDirty() || cardSettingsUi?.isBusy() || rulesBusy || categorySaving || batchBusy || filesBusy || statements.some(s => hasUnsavedChanges(s)))
+            throw new Error('未保存の変更があります。保存または破棄してからお試しください。');
+    };
+    const compare = async () => {
+        assertSafe();
+        const old = await readStatements();
+        const cloud = await liveVault.refresh();
+        return verifyLegacyMigration(old, cloud, async (id) => (await readOriginal(id))?.bytes ?? null, id => liveVault.original(id));
+    };
+    $('cloud-legacy-cleanup').addEventListener('click', () => {
+        reset();
+        dialog.showModal();
+    });
+    $('legacy-cleanup-close').addEventListener('click', () => { if (!busy)
+        dialog.close(); });
+    dialog.addEventListener('cancel', event => { if (busy)
+        event.preventDefault(); });
+    dialog.addEventListener('close', () => { lockVault(); reset(); });
+    const execute = async (work) => {
+        if (busy)
+            return;
+        busy = true;
+        checkButton.disabled = true;
+        backupButton.disabled = true;
+        deleteButton.disabled = true;
+        try {
+            await work();
+        }
+        catch (error) {
+            report(error instanceof Error ? error.message : '確認に失敗しました。', true);
+            verified = false;
+            deleteButton.disabled = true;
+        }
+        finally {
+            busy = false;
+            checkButton.disabled = false;
+            backupButton.disabled = false;
+            deleteButton.disabled = !verified;
+        }
+    };
+    checkButton.addEventListener('click', () => {
+        void execute(async () => {
+            backup = null;
+            verified = false;
+            backupButton.classList.add('hidden');
+            fileLabel.classList.add('hidden');
+            deleteButton.classList.add('hidden');
+            if (!await hasVault())
+                throw new Error('この端末に旧データはありません。');
+            if (!secretInput.value)
+                throw new Error('旧パスフレーズを入力してください。');
+            await unlockVault(secretInput.value);
+            secretInput.value = '';
+            const result = await compare();
+            backup = await exportEncryptedBackup();
+            report(`${result.statementCount}件の明細とPDF原本${result.sourceCount}件を照合しました。`);
+            backupButton.classList.remove('hidden');
+            fileLabel.classList.remove('hidden');
+        });
+    });
+    backupButton.addEventListener('click', () => {
+        if (!backup)
+            return;
+        const url = URL.createObjectURL(backup);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `finance-legacy-backup-${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.append(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    });
+    backupInput.addEventListener('change', () => {
+        void execute(async () => {
+            verified = false;
+            if (!backup || !backupInput.files?.[0])
+                throw new Error('バックアップファイルを選択してください。');
+            if (!await verifyDownloadedBackup(backup, backupInput.files[0]))
+                throw new Error('保存したバックアップと一致しません。');
+            verified = true;
+            report('バックアップを確認しました。');
+            deleteButton.classList.remove('hidden');
+        });
+    });
+    deleteButton.addEventListener('click', () => {
+        void execute(async () => {
+            if (!verified || !backup)
+                throw new Error('バックアップの確認が必要です。');
+            // Refresh and compare once more immediately before deletion.
+            await compare();
+            // An old tab may have updated IndexedDB after the download. Never delete
+            // records unless the selected backup still covers the exact latest ciphertext.
+            const exported = JSON.parse(await backup.text());
+            const current = JSON.parse(await (await exportEncryptedBackup()).text());
+            delete exported.createdAt;
+            delete current.createdAt;
+            if (JSON.stringify(exported) !== JSON.stringify(current))
+                throw new Error('旧データが更新されています。もう一度照合とバックアップを行ってください。');
+            if (!window.confirm('この端末の旧データを削除します。よろしいですか？'))
+                return;
+            await deleteLegacyVault();
+            verified = false;
+            backup = null;
+            dialog.close();
+            toast('旧データを削除しました。');
+        });
+    });
+}
+/** Temporary hover expansion never changes the saved collapsed preference. */
+let desktopMenuPeekTimer = null;
+let desktopMenuCloseTimer = null;
+let desktopMenuResetTimer = null;
+function hideSidebarTooltip() {
+    const tip = document.getElementById('sidebar-tooltip');
+    if (tip)
+        tip.hidden = true;
+}
+function clearDesktopMenuPeek() {
+    hideSidebarTooltip();
+    if (desktopMenuPeekTimer !== null) {
+        window.clearTimeout(desktopMenuPeekTimer);
+        desktopMenuPeekTimer = null;
+    }
+    if (desktopMenuCloseTimer !== null) {
+        window.clearTimeout(desktopMenuCloseTimer);
+        desktopMenuCloseTimer = null;
+    }
+    const shell = document.querySelector('.app-shell');
+    const wasPeeking = shell?.classList.contains('nav-peeking') ?? false;
+    if (desktopMenuResetTimer !== null) {
+        window.clearTimeout(desktopMenuResetTimer);
+        desktopMenuResetTimer = null;
+    }
+    if (wasPeeking)
+        shell?.classList.add('nav-peek-resetting');
+    else
+        shell?.classList.remove('nav-peek-resetting');
+    shell?.classList.remove('nav-peeking', 'nav-peek-closing');
+    // Prevent the 244px overlay from tweening back into the 72px flex slot.
+    // Normal button-initiated width transitions remain unchanged.
+    if (wasPeeking)
+        desktopMenuResetTimer = window.setTimeout(() => {
+            shell?.classList.remove('nav-peek-resetting');
+            desktopMenuResetTimer = null;
+        }, 40);
+}
+/** Hover-only closing animation: preserve the rail until the drawer has retracted. */
+function closeDesktopMenuPeek() {
+    hideSidebarTooltip();
+    if (desktopMenuPeekTimer !== null) {
+        window.clearTimeout(desktopMenuPeekTimer);
+        desktopMenuPeekTimer = null;
+    }
+    const shell = document.querySelector('.app-shell');
+    if (!shell?.classList.contains('nav-peeking') || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        clearDesktopMenuPeek();
+        return;
+    }
+    if (desktopMenuCloseTimer !== null)
+        window.clearTimeout(desktopMenuCloseTimer);
+    shell.classList.add('nav-peek-closing');
+    desktopMenuCloseTimer = window.setTimeout(clearDesktopMenuPeek, 190);
+}
+/** Desktop compact sidebar preference contains no financial data. */
+function setDesktopMenuCollapsed(collapsed) {
+    clearDesktopMenuPeek();
+    const shell = document.querySelector('.app-shell');
+    const button = document.getElementById('sidebar-collapse-toggle');
+    shell?.classList.toggle('nav-collapsed', collapsed);
+    hideSidebarTooltip();
+    if (button) {
+        button.setAttribute('aria-expanded', String(!collapsed));
+        button.setAttribute('aria-label', collapsed ? 'メニューを固定表示する' : 'メニューを折りたたむ');
+        button.title = collapsed ? 'メニューを固定表示する' : 'メニューを折りたたむ';
+        const label = document.getElementById('sidebar-collapse-label');
+        if (label)
+            label.textContent = collapsed ? '固定表示' : '折りたたむ';
+    }
+    try {
+        window.localStorage.setItem('finance-sidebar-collapsed', collapsed ? '1' : '0');
+    }
+    catch { /* storage disabled */ }
+}
+/** Only mouse hover, and only after a deliberate dwell, temporarily expands the menu. */
+function scheduleDesktopMenuPeek() {
+    const shell = document.querySelector('.app-shell');
+    if (!shell?.classList.contains('nav-collapsed') || window.matchMedia('(max-width: 800px)').matches)
+        return;
+    if (shell.classList.contains('nav-peek-closing')) {
+        if (desktopMenuCloseTimer !== null) {
+            window.clearTimeout(desktopMenuCloseTimer);
+            desktopMenuCloseTimer = null;
+        }
+        shell.classList.remove('nav-peek-closing');
+        return;
+    }
+    if (desktopMenuPeekTimer !== null)
+        window.clearTimeout(desktopMenuPeekTimer);
+    desktopMenuPeekTimer = window.setTimeout(() => {
+        desktopMenuPeekTimer = null;
+        const shell = document.querySelector('.app-shell');
+        if (!shell?.classList.contains('nav-collapsed'))
+            return;
+        hideSidebarTooltip();
+        shell.classList.add('nav-peeking');
+    }, 340);
+}
 /** Mobile disclosure uses one state source for buttons, assistive tech and keyboard access. */
 function setMobileMenuOpen(requested) {
     const isMobile = window.matchMedia('(max-width: 800px)').matches;
@@ -802,10 +1117,29 @@ function setMobileMenuOpen(requested) {
         panel.inert = isMobile && !expanded;
 }
 function showView(view) {
+    // Client-side navigation keeps the sidebar in the DOM, so let hover reveal
+    // retract before removing its overlay. Explicit toggle actions stay separate.
+    if (document.querySelector('.app-shell.nav-peeking'))
+        closeDesktopMenuPeek();
+    else
+        clearDesktopMenuPeek();
+    hideSidebarTooltip();
+    const fromHome = homeNavigationPending;
+    homeNavigationPending = false;
+    returnToHome = fromHome && (view === 'manage' || view === 'import' || view === 'assets') ? view : null;
     setMobileMenuOpen(false);
     if (view !== 'manage')
         manageReturnToSummary = false;
+    if (view !== 'manage') {
+        activeAnalysisDrilldown = null;
+        drilldownRows.clear();
+    }
     $('manage-back-summary').classList.toggle('hidden', view !== 'manage' || !manageReturnToSummary);
+    $('manage-back-analysis').classList.toggle('hidden', view !== 'manage' || !activeAnalysisDrilldown || fromHome);
+    $('manage-back-home').classList.toggle('hidden', view !== 'manage' || returnToHome !== 'manage');
+    $('import-back-home').classList.toggle('hidden', view !== 'import' || returnToHome !== 'import');
+    $('assets-back-home').classList.toggle('hidden', view !== 'assets' || returnToHome !== 'assets');
+    $('home-view').classList.toggle('hidden', view !== 'home');
     $('import-view').classList.toggle('hidden', view !== 'import');
     $('manage-view').classList.toggle('hidden', view !== 'manage');
     $('rules-view').classList.toggle('hidden', view !== 'rules');
@@ -813,9 +1147,12 @@ function showView(view) {
     $('assets-page').classList.toggle('hidden', view !== 'assets');
     $('future-view').classList.toggle('hidden', view !== 'future'); /* finance-v148 */
     $('summary-view').classList.toggle('hidden', view !== 'summary');
+    $('analysis-view').classList.toggle('hidden', view !== 'analysis');
+    $('reports-view').classList.toggle('hidden', view !== 'reports');
+    $('subscriptions-view').classList.toggle('hidden', view !== 'subscriptions');
     // The overview already shows the cloud state; avoid repeating the global banner.
-    $('cloud-live-bar').classList.toggle('hidden', view === 'settings');
-    for (const mode of ['import', 'manage', 'summary', 'rules', 'assets', 'future', 'settings']) {
+    $('cloud-live-bar').classList.add('hidden');
+    for (const mode of ['home', 'import', 'manage', 'summary', 'analysis', 'subscriptions', 'reports', 'rules', 'assets', 'future', 'settings']) {
         const nav = $(`nav-${mode}`);
         nav.classList.toggle('active', view === mode);
         if (view === mode)
@@ -837,10 +1174,20 @@ function showView(view) {
     }
     if (view === 'assets')
         assetsUi?.render();
+    if (view === 'settings')
+        cardSettingsUi?.render();
     if (view === 'future')
         futureUi?.render();
     if (view === 'summary')
         summaryUi?.render();
+    if (view === 'analysis')
+        analysisUi?.render();
+    if (view === 'reports')
+        reportsUi?.render();
+    if (view === 'subscriptions')
+        subscriptionsUi?.render();
+    if (view === 'home')
+        homeUi?.render();
     // Switching menus always starts the destination at its top. Explicit
     // 'back to summary' navigation restores its captured position afterward.
     const content = document.querySelector('.workspace > .content');
@@ -850,7 +1197,16 @@ function showView(view) {
     saveLastView(sessionStorageSafe(), view);
 }
 function managerIndices() {
-    return filteredStatementIndices(statements, manageYear, manageMonth);
+    if (!activeAnalysisDrilldown) {
+        drilldownRows.clear();
+        return filteredStatementIndices(statements, manageYear, manageMonth);
+    }
+    const source = analysisSourceProvider?.();
+    drilldownRows = source ? analysisDrilldownMatches(source, activeAnalysisDrilldown) : new Map();
+    return statements.map((statement, index) => ({ statement, index, id: savedIds.get(statement) }))
+        .filter(item => item.id && drilldownRows.has(item.id))
+        .sort((a, b) => (b.statement.paymentDate ?? '').localeCompare(a.statement.paymentDate ?? '') || a.index - b.index)
+        .map(item => item.index);
 }
 function selectVisibleManagerStatement() {
     const indices = managerIndices();
@@ -872,6 +1228,13 @@ function setOptions(select, choices, selected) {
     select.value = selected;
 }
 function renderManagerFilters() {
+    const drilldown = activeAnalysisDrilldown;
+    $('manage-drilldown').classList.toggle('hidden', !drilldown);
+    $('manage-period-controls').classList.toggle('hidden', !!drilldown);
+    if (drilldown) {
+        $('manage-drilldown-title').textContent = `${drilldown.label} · ${drilldownPeriodLabel(drilldown.periods)}`;
+        $('manage-drilldown-description').textContent = '支払月で絞り込み中 · 該当する取引行のみ表示';
+    }
     const picker = $('manage-period');
     picker.value = manageYear === 'all' || manageMonth === 'all' ? '' : `${manageYear}-${manageMonth}`;
     $('manage-show-all').classList.toggle('active', manageYear === 'all' && manageMonth === 'all');
@@ -892,15 +1255,85 @@ function manageShiftMonth(offset) {
     const target = new Date(Date.UTC(year, month - 1 + offset, 1));
     manageChangePeriod(`${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, '0')}`);
 }
+function openRecurringForReview(entryId) {
+    const vault = liveVault;
+    if (!vault?.unlocked) {
+        toast('OneDrive保管庫を解除してください。');
+        return;
+    }
+    if (!vault.assetSettings().recurring.some(item => item.id === entryId)) {
+        toast('定期入出金が見つかりません。OneDriveを更新してください。');
+        return;
+    }
+    showView('assets');
+    if (!assetsUi?.openRecurring(entryId))
+        toast('定期入出金の編集画面を開けませんでした。');
+}
+function renderManagerDrilldownBreakdown() {
+    const block = $('manage-drilldown-breakdown');
+    block.classList.toggle('hidden', !activeAnalysisDrilldown);
+    $('manage-view').classList.toggle('manage-with-drilldown', !!activeAnalysisDrilldown);
+    block.replaceChildren();
+    const request = activeAnalysisDrilldown, source = analysisSourceProvider?.();
+    if (!request || !source)
+        return;
+    try {
+        const data = analysisDrilldownBreakdown(source, request);
+        const heading = document.createElement('h2');
+        heading.textContent = '対象金額の内訳';
+        block.append(heading);
+        const summary = div('manage-breakdown-totals');
+        for (const [label, amount] of [['カード取引', data.cardAmount], ['銀行の定期支出予定', data.recurringAmount], ['分析の合計', data.total]]) {
+            const item = div('manage-breakdown-total');
+            const name = document.createElement('span');
+            name.textContent = label;
+            const value = document.createElement('strong');
+            value.textContent = `${amount.toLocaleString('ja-JP')}円`;
+            item.append(name, value);
+            summary.append(item);
+        }
+        block.append(summary);
+        if (data.recurring.length) {
+            const note = document.createElement('p');
+            note.className = 'manage-breakdown-note';
+            note.textContent = '銀行の定期支出は予定として計上しています。カード取引とは別に、以下から確認・修正できます。';
+            block.append(note);
+            const list = div('manage-breakdown-recurring');
+            for (const entry of data.recurring) {
+                const row = div('manage-breakdown-recurring-item');
+                const name = div('manage-breakdown-recurring-name');
+                const title = document.createElement('strong');
+                title.textContent = entry.name;
+                const detail = document.createElement('small');
+                detail.textContent = `${entry.date} · ${entry.amount.toLocaleString('ja-JP')}円${entry.cardOverlap ? ' · カードと重複の可能性' : ''}`;
+                name.append(title, detail);
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'secondary-action';
+                button.textContent = '口座管理で確認';
+                button.addEventListener('click', () => openRecurringForReview(entry.entryId));
+                row.append(name, button);
+                list.append(row);
+            }
+            block.append(list);
+        }
+    }
+    catch (error) {
+        const message = document.createElement('p');
+        message.textContent = `内訳を表示できません：${error instanceof Error ? error.message : 'データを確認してください。'}`;
+        block.append(message);
+    }
+}
 function renderManager() {
     const indices = renderManagerFilters();
+    renderManagerDrilldownBreakdown();
     $('manage-list-count').textContent = `${indices.length}件`;
     const managerList = $('manage-list');
     managerList.replaceChildren();
     for (const index of indices)
         managerList.append(createStatementEntry(index, false));
     if (!indices.length)
-        managerList.append(div('empty-list', statements.length ? 'この年月の明細はありません。' : '明細がありません。'));
+        managerList.append(div('empty-list', activeAnalysisDrilldown ? 'この条件に一致する明細はありません。' : statements.length ? 'この年月の明細はありません。' : '明細がありません。'));
     if (!indices.includes(activeIndex))
         activeIndex = indices[0] ?? -1;
     const s = indices.includes(activeIndex) ? active() : undefined;
@@ -911,18 +1344,20 @@ function renderManager() {
     if (!s)
         return;
     renderCardOptions(s);
-    $('manage-month').value = s.billingMonth ?? '';
-    $('manage-payment').value = dateDisplay(s.paymentDate).replace('未取得', '');
-    $('manage-status').textContent = hasUnsavedChanges(s) ? 'OneDrive未保存' : `OneDrive保存済み${lastSavedAt ? ` · ${lastSavedAt}` : ''}`;
+    $('manage-month').textContent = s.billingMonth ? `${s.billingMonth.slice(0, 4)}年${Number(s.billingMonth.slice(5))}月` : '未取得';
+    $('manage-payment').textContent = dateDisplay(s.paymentDate);
+    $('manage-status').textContent = hasUnsavedChanges(s) ? '未保存の変更' : '保存済み';
+    $('manage-points').querySelector('strong').textContent = `${statementPoints(s, liveVault?.unlocked ? liveVault.assetSettings().cardPreferences : undefined).toLocaleString('ja-JP')} pt`;
     const originalButton = $('manage-original-download');
     const savedId = savedIds.get(s);
     originalButton.disabled = batchBusy || filesBusy || !liveVault?.unlocked || !savedId ||
         !liveVault.records().some(record => record.id === savedId && !!record.originalId);
-    originalButton.title = s.sourceKind === 'pdf' ? '復号したPDFが端末のダウンロード先に保存されます。' : 'Web貼り付け明細にPDF原本はありません。';
-    $('manage-save').disabled = batchBusy || filesBusy;
+    originalButton.title = s.sourceKind === 'pdf' ? '復号したPDFが端末のダウンロード先に保存されます。' : 'CSV・テキスト貼り付け明細にPDF原本はありません。';
+    $('manage-save').disabled = batchBusy || filesBusy || !hasUnsavedChanges(s);
+    $('manage-add-row').disabled = !!activeAnalysisDrilldown;
     $('manage-delete').disabled = batchBusy || filesBusy;
-    const errorMessages = issues(s);
-    $('manage-validation').textContent = errorMessages.length ? `要修正：${errorMessages.join(' / ')}` : '検証OK。保存済み明細の変更は自動反映されます。';
+    const errorMessages = displayIssues(s);
+    $('manage-validation').textContent = errorMessages.length ? `要修正：${errorMessages.join(' / ')}` : cardSelectionPending(s) ? 'カード選択待ち' : hasUnsavedChanges(s) ? '変更は保存ボタンを押すまで反映されません。' : '検証OK。';
     for (const [key, id, label] of [['usedOn', 'manage-sort-date', '利用日'], ['amount', 'manage-sort-amount', '金額']]) {
         const button = $(id);
         const active = manageSort?.key === key;
@@ -932,7 +1367,10 @@ function renderManager() {
     const body = $('manage-rows');
     body.replaceChildren();
     // Sorting is display-only: deletions must continue to address original row indices.
-    for (const { index, row } of orderedPreviewRows(s.rows.map((row, index) => ({ row, index, usedOn: row.usedOn, amount: row.amount })), manageSort)) {
+    const matchingRows = activeAnalysisDrilldown ? drilldownRows.get(savedIds.get(s) ?? '') : null;
+    const visibleRows = s.rows.map((row, index) => ({ row, index, usedOn: row.usedOn, amount: row.amount }))
+        .filter(item => !activeAnalysisDrilldown || matchingRows?.has(item.row.id));
+    for (const { index, row } of orderedPreviewRows(visibleRows, manageSort)) {
         const tr = document.createElement('tr');
         const fields = [
             [dateDisplay(row.usedOn), '利用日', value => {
@@ -1152,7 +1590,7 @@ function renderRules() {
         const source = div('rules-item-source', `${[rule.pattern, ...(rule.patterns ?? [])].join(' / ')} · ${ruleModes[rule.mode]}`);
         heading.append(name, source);
         main.append(heading);
-        const card = rule.cardId ? getCard(rule.cardId)?.name ?? rule.cardId : '全カード';
+        const card = rule.cardId ? cardDisplayName(rule.cardId) ?? rule.cardId : '全カード';
         const metaLine = div('rules-item-meta-line');
         metaLine.append(div('rules-item-meta', `${card} · 優先 ${rule.priority}`));
         const category = categoryById(rule.categoryId);
@@ -1304,7 +1742,8 @@ async function saveCategoryDialog() {
     categorySaving = true;
     rulesBusy = true;
     renderCategoryDraft();
-    $('rules-category-status').textContent = 'OneDriveにカテゴリーを一括保存中…';
+    $('rules-category-status').textContent = '';
+    showActivity('カテゴリーを保存中…', 'working');
     try {
         await liveVault.applyCategoryBatch(changes);
         categoryDraft = null;
@@ -1351,7 +1790,7 @@ function renderRecentMerchants() {
         const name = document.createElement('strong');
         name.textContent = item.merchant;
         const detail = document.createElement('small');
-        detail.textContent = `${getCard(item.cardId)?.name ?? 'カード不明'} · 最終利用 ${item.lastDate || '不明'} · ${item.count}回`;
+        detail.textContent = `${cardDisplayName(item.cardId) ?? 'カード不明'} · 最終利用 ${item.lastDate || '不明'} · ${item.count}回`;
         button.append(name, detail);
         button.addEventListener('click', () => {
             $('rule-pattern').value = item.merchant;
@@ -1377,12 +1816,13 @@ async function saveRule(rule) {
     rulesBusy = true;
     $('rule-save').disabled = true;
     $('rules-sync-status').className = 'rules-sync-status';
-    $('rules-sync-status').textContent = 'OneDriveへ利用先ルールを保存中…';
+    $('rules-sync-status').textContent = '';
+    showActivity('利用先ルールを保存中…', 'working');
     try {
         await liveVault.upsertMerchantRule(rule);
         if (editingRuleId === rule.id)
             resetRuleEditor();
-        $('rules-sync-status').textContent = 'OneDriveに利用先ルールを保存しました。過去の明細にも反映済みです。';
+        $('rules-sync-status').textContent = '';
         operationResult('利用先ルールをOneDriveに保存しました。');
         render();
     }
@@ -1405,11 +1845,12 @@ async function deleteRule(rule) {
         return;
     rulesBusy = true;
     try {
-        $('rules-sync-status').textContent = 'OneDriveからルールを削除中…';
+        $('rules-sync-status').textContent = '';
+        showActivity('利用先ルールを削除中…', 'working');
         await liveVault.removeMerchantRule(rule.id);
         if (editingRuleId === rule.id)
             resetRuleEditor();
-        $('rules-sync-status').textContent = 'OneDriveからルールを削除しました。';
+        $('rules-sync-status').textContent = '';
         operationResult('利用先ルールを削除しました。');
         render();
     }
@@ -1427,7 +1868,7 @@ async function deleteRule(rule) {
 async function refreshVaultControls() {
     updateCloudStatus();
     $('preview-empty').querySelector('p').textContent = liveVault?.unlocked
-        ? '上のエリアからPDFを選ぶか、Web明細を貼り付けてください。'
+        ? '上のエリアからCSV・PDFを選択してください。テキスト貼り付けは詳細設定から利用できます。'
         : 'OneDriveに接続し、暗号化保管庫を解除すると保存済みの明細が表示されます。';
 }
 function modalClose(success) {
@@ -1516,7 +1957,6 @@ async function saveEditedStatement(s, manual = false) {
     if (batchBusy || filesBusy) {
         if (manual)
             operationResult('別の保存処理中です。変更は未保存のまま保持しています。', 'working');
-        autoSaveTimer = setTimeout(() => { void saveEditedStatement(s); }, 650);
         return;
     }
     if (issues(s).length) {
@@ -1548,7 +1988,7 @@ async function saveEditedStatement(s, manual = false) {
                 replaceCloudRecords(liveVault.records());
         }
         else {
-            autoSaveTimer = setTimeout(() => { void saveEditedStatement(s); }, 550);
+            // Further edits during an in-flight Save remain in memory until the next click.
         }
         if (!hasUnsavedChanges(s)) {
             updateCloudStatus(mutationWarning ?? '変更をOneDriveに保存しました。');
@@ -1556,7 +1996,7 @@ async function saveEditedStatement(s, manual = false) {
             toast(mutationWarning ?? '変更内容をOneDriveに保存しました。');
         }
         else
-            operationResult('追加の変更を検出しました。続けて保存しています…', 'working');
+            operationResult('保存中に新しい変更がありました。もう一度保存してください。', 'warn');
     }
     catch (error) {
         const uncertain = error instanceof CloudWriteUncertainError;
@@ -1571,7 +2011,7 @@ async function saveEditedStatement(s, manual = false) {
     }
 }
 async function saveAllPending() {
-    if (batchBusy || filesBusy)
+    if (batchBusy || filesBusy || revisionBusy)
         return;
     const candidates = importQueue().filter(hasUnsavedChanges);
     if (!candidates.length)
@@ -1640,44 +2080,179 @@ async function saveAllPending() {
         render();
     }
 }
-function acceptStatement(s, source) {
-    if (batchBusy) {
-        toast('保存処理中は追加できません。');
+/** Display actual old/new rows before a month is replaced, regardless of import source. */
+function confirmStatementRevision(old, newStatement, diff) {
+    return new Promise(resolve => {
+        const dialog = $('import-revision-dialog');
+        const ok = $('import-revision-accept');
+        const cancel = $('import-revision-cancel');
+        const warning = $('import-revision-override-warning');
+        const acknowledged = $('import-revision-override-accept');
+        const details = $('import-revision-details');
+        details.replaceChildren();
+        const needsAck = diff.overridesLost.length > 0;
+        warning.classList.toggle('hidden', !needsAck);
+        acknowledged.checked = false;
+        ok.disabled = needsAck;
+        const label = cardDisplayName(newStatement.cardId) ?? 'カード';
+        $('import-revision-summary').textContent =
+            `${label}　${newStatement.billingMonth}分\n保存済み：${old.sourceKind === 'paste' ? 'テキスト' : old.sourceKind.toUpperCase()} ${yen(old.statedTotal)}（${old.rows.length}件）\n` +
+                `新規：${newStatement.sourceKind === 'paste' ? 'テキスト' : newStatement.sourceKind.toUpperCase()} ${yen(newStatement.statedTotal)}（${newStatement.rows.length}件）`;
+        const stats = $('import-revision-stats');
+        stats.replaceChildren();
+        for (const [name, count] of [['一致', diff.matched], ['新規', diff.added.length], ['削除', diff.removed.length],
+            ['補足変更', diff.changed.length], ['重複・曖昧', diff.ambiguous.length], ['表示名引継ぎ', diff.transferred], ['補足引継ぎ', diff.notesTransferred]]) {
+            const span = document.createElement('span');
+            span.textContent = `${name} ${count}件`;
+            stats.append(span);
+        }
+        const section = (heading, rows) => {
+            if (!rows.length)
+                return;
+            const block = document.createElement('section');
+            const strong = document.createElement('strong');
+            strong.textContent = `${heading}（${rows.length}件）`;
+            block.append(strong);
+            for (const row of rows.slice(0, 50)) {
+                const p = document.createElement('p');
+                p.textContent = `${row.usedOn}　${row.merchant}　${yen(row.amount)}${row.merchantOverride ? '　表示名:' + row.merchantOverride : ''}`;
+                block.append(p);
+            }
+            if (rows.length > 50) {
+                const more = document.createElement('p');
+                more.textContent = `ほか${rows.length - 50}件`;
+                block.append(more);
+            }
+            details.append(block);
+        };
+        section('CSV・新しい明細にのみ存在', diff.added);
+        section('旧明細にのみ存在（差し替えで削除）', diff.removed);
+        section('同条件の取引が複数あり、一対一で引き継げない行', diff.ambiguous);
+        section('引き継げない表示名・補足がある行', diff.overridesLost);
+        if (diff.changed.length) {
+            const block = document.createElement('section');
+            const head = document.createElement('strong');
+            head.textContent = `補足の変更（${diff.changed.length}件）`;
+            block.append(head);
+            for (const change of diff.changed.slice(0, 50)) {
+                const x = document.createElement('p');
+                x.textContent = `${change.after.usedOn} ${change.after.merchant}：${change.before.description || 'なし'} → ${change.after.description || 'なし'}`;
+                block.append(x);
+            }
+            details.append(block);
+        }
+        if (!details.children.length) {
+            const neutral = document.createElement('section');
+            neutral.textContent = '取引金額・利用先・日付に差分はありません。取り込み元を更新します。';
+            details.append(neutral);
+        }
+        // The checkbox label stays stable across repeated imports; counts are shown above.
+        const finish = (accepted) => {
+            dialog.removeEventListener('cancel', onCancel);
+            ok.removeEventListener('click', onOk);
+            cancel.removeEventListener('click', onCancelClick);
+            acknowledged.removeEventListener('change', onChange);
+            if (dialog.open)
+                dialog.close();
+            resolve(accepted);
+        };
+        const onCancel = (event) => { event.preventDefault(); finish(false); };
+        const onCancelClick = () => finish(false);
+        const onOk = () => { if (needsAck && !acknowledged.checked)
+            return; finish(true); };
+        const onChange = () => { ok.disabled = needsAck && !acknowledged.checked; };
+        dialog.addEventListener('cancel', onCancel);
+        cancel.addEventListener('click', onCancelClick);
+        ok.addEventListener('click', onOk);
+        acknowledged.addEventListener('change', onChange);
+        dialog.showModal();
+    });
+}
+/** CSV is structurally valid even when its payment configuration is missing.
+ *  Payment-date validation belongs to the save gate, never to CSV parsing. */
+function csvPaymentDate(cardId, billingMonth) {
+    const existing = statements.find(s => s.cardId === cardId && s.billingMonth === billingMonth);
+    if (existing?.paymentDate && validDate(existing.paymentDate))
+        return existing.paymentDate;
+    const timing = liveVault?.unlocked ? liveVault.assetSettings().cardPreferences?.[cardId]?.payment : undefined;
+    return timing ? cardPaymentDate(billingMonth, timing) : null;
+}
+/** Complete queued, still-unpaid CSV drafts after the encrypted card settings are saved. */
+function applyCsvPaymentSettings() {
+    for (const statement of importQueue()) {
+        if (statement.sourceKind !== 'csv' || statement.paymentDate || !statement.cardId || !statement.billingMonth)
+            continue;
+        const date = csvPaymentDate(statement.cardId, statement.billingMonth);
+        if (!date)
+            continue;
+        statement.paymentDate = date;
+        importedSignatures.set(statement, statementSignature(statement));
+    }
+}
+function cardsMissingCsvPayment() {
+    return [...new Set(importQueue()
+            .filter(s => s.sourceKind === 'csv' && !s.paymentDate && s.cardId)
+            .map(s => s.cardId))];
+}
+async function acceptStatement(s, source) {
+    if (batchBusy || revisionBusy) {
+        toast('別の処理中は明細を追加できません。');
         return;
     }
     const decision = planStatementImport(statements, s, existing => importedSignatures.get(existing) ?? statementSignature(existing));
-    if (decision.kind === 'duplicate') {
+    const replacingSameContent = decision.kind === 'duplicate' && s.sourceKind === 'csv' &&
+        statements[decision.index].sourceKind !== 'csv';
+    if (decision.kind === 'duplicate' && !replacingSameContent) {
         activeIndex = importStaged.has(statements[decision.index]) ? decision.index : -1;
         render();
-        toast('同一内容の明細はすでに取り込まれています。保存済み明細は「明細の管理」で確認できます。');
+        toast('同一内容の明細はすでに登録されています。重複保存しません。');
         return;
     }
-    if (decision.kind === 'revision') {
-        const existing = statements[decision.index];
-        const label = getCard(s.cardId)?.name ?? providerLabel(s.provider);
-        // Re-imported revisions are queued for the single batch commit.
-        // Previously edited rows are not overwritten without review in Manage.
-        if (dirty.has(existing)) {
-            activeIndex = decision.index;
-            render();
-            toast('未保存の修正があるため上書きせずに残しました。明細の管理で確認してください。');
+    if (decision.kind === 'revision' || replacingSameContent) {
+        const index = decision.index;
+        const existing = statements[index];
+        if (hasUnsavedChanges(existing) && !importStaged.has(existing)) {
+            toast('同じ月に未保存の編集があります。先に明細の管理で保存してください。');
             return;
         }
-        statements[decision.index] = s;
-        const oldId = savedIds.get(existing);
-        if (oldId) {
-            savedIds.set(s, oldId);
-            savedFingerprints.set(s, savedFingerprints.get(existing) ?? statementWorkingFingerprint(existing));
-            dirty.add(s);
-            if (originalSaved.has(existing))
-                originalSaved.add(s);
-        }
-        attachSource(s, source);
-        importedSignatures.set(s, statementSignature(s));
-        importStaged.add(s);
-        activeIndex = decision.index;
+        const prepared = prepareStatementRevision(existing, s);
+        const baseline = statementWorkingFingerprint(existing);
+        revisionBusy = true;
         render();
-        toast(`${label}の${s.billingMonth}分を更新しました（旧: ${yen(existing.statedTotal)} → 新: ${yen(s.statedTotal)}）。`);
+        try {
+            if (!await confirmStatementRevision(existing, prepared.statement, prepared.diff)) {
+                toast('差し替えを取り消しました。保存済みの明細はそのままです。');
+                return;
+            }
+            // A cloud refresh or local edit while the dialog was open must not retarget the replacement.
+            if (statements[index] !== existing || statementWorkingFingerprint(existing) !== baseline)
+                throw new Error('差し替え対象が更新されました。CSVを読み直してください。');
+            const revised = prepared.statement;
+            statements[index] = revised;
+            const oldId = savedIds.get(existing) ?? pendingCloudIds.get(existing);
+            if (oldId) {
+                if (savedIds.has(existing)) {
+                    savedIds.set(revised, oldId);
+                    savedFingerprints.set(revised, savedFingerprints.get(existing) ?? statementWorkingFingerprint(existing));
+                    dirty.add(revised);
+                }
+                else
+                    pendingCloudIds.set(revised, oldId);
+                if (originalSaved.has(existing))
+                    originalSaved.add(revised);
+            }
+            attachSource(revised, source);
+            importedSignatures.set(revised, statementSignature(s));
+            importStaged.add(revised);
+            $('entry-accordion').open = false;
+            activeIndex = index;
+            render();
+            toast(`${cardDisplayName(s.cardId) ?? 'カード'}の${s.billingMonth}分を差し替え待ちにしました。まだOneDriveには保存していません。`);
+        }
+        finally {
+            revisionBusy = false;
+            render();
+        }
         return;
     }
     importedSignatures.set(s, statementSignature(s));
@@ -1685,23 +2260,37 @@ function acceptStatement(s, source) {
     importStaged.add(s);
     statements.unshift(s);
     activeIndex = 0;
+    $('entry-accordion').open = false;
     render();
-    toast(`${getCard(s.cardId)?.name ?? providerLabel(s.provider)}の明細を解析しました（${s.rows.length}件）。`);
+    toast(`${cardDisplayName(s.cardId) ?? providerLabel(s.provider)}の明細を解析しました（${s.rows.length}件）。`);
 }
 async function handleFiles(files) {
+    if (filesBusy || batchBusy || revisionBusy) {
+        toast('別の取込処理が完了してから追加してください。');
+        return;
+    }
     filesBusy = true;
     updateBatchStatus();
+    showActivity('明細を読み込み中…', 'working');
     try {
         for (const file of Array.from(files)) {
-            if (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf') {
-                failedImports.push(`${file.name}: PDF形式ではありません`);
+            const name = file.name.toLowerCase();
+            if (!name.endsWith('.pdf') && !name.endsWith('.csv')) {
+                failedImports.push(`${file.name}: CSVまたはPDF形式ではありません。`);
                 render();
-                toast('PDF形式のファイルを選択してください。');
                 continue;
             }
             try {
-                const result = await parsePdfFile(file);
-                acceptStatement(result, { bytes: new Uint8Array(await file.arrayBuffer()), mime: 'application/pdf' });
+                if (name.endsWith('.csv')) {
+                    const text = decodeCardCsv(await file.arrayBuffer());
+                    const meta = identifyCardCsv(text, file.name);
+                    const date = csvPaymentDate(meta.cardId, meta.billingMonth);
+                    await acceptStatement(parseCardCsv(text, file.name, date));
+                }
+                else {
+                    const parsed = await parsePdfFile(file);
+                    await acceptStatement(parsed, { bytes: new Uint8Array(await file.arrayBuffer()), mime: 'application/pdf' });
+                }
             }
             catch (error) {
                 const reason = `${file.name}: ${error instanceof Error ? error.message : '読み込みに失敗しました。'}`;
@@ -1713,79 +2302,129 @@ async function handleFiles(files) {
     }
     finally {
         filesBusy = false;
+        finishActivity('明細を読み込み中');
         render();
     }
 }
 const THEME_KEY = 'finance-theme';
-const darkMedia = window.matchMedia('(prefers-color-scheme: dark)');
 function getThemeMode() {
     try {
-        const value = localStorage.getItem(THEME_KEY);
-        return value === 'light' || value === 'dark' ? value : 'system';
+        return localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light';
     }
     catch {
-        return 'system';
+        return 'light';
     }
 }
 function applyTheme(mode) {
-    document.documentElement.dataset.theme = mode === 'system' ? (darkMedia.matches ? 'dark' : 'light') : mode;
+    document.documentElement.dataset.theme = mode;
 }
 function initTheme() {
-    const picker = $('theme-mode');
-    const mobileToggle = document.getElementById('mobile-theme-toggle');
-    const syncIcon = () => {
-        if (!mobileToggle)
-            return;
+    const toggles = [document.getElementById('mobile-theme-toggle'), document.getElementById('desktop-theme-toggle')];
+    const syncIcons = () => {
         const dark = document.documentElement.dataset.theme === 'dark';
         const message = dark ? 'ライトモードに切り替える' : 'ダークモードに切り替える';
-        mobileToggle.setAttribute('aria-label', message);
-        mobileToggle.title = message;
-    };
-    picker.value = getThemeMode();
-    applyTheme(picker.value);
-    syncIcon();
-    picker.addEventListener('change', () => {
-        const value = picker.value;
-        try {
-            if (value === 'system')
-                localStorage.removeItem(THEME_KEY);
-            else
-                localStorage.setItem(THEME_KEY, value);
+        for (const toggle of toggles) {
+            if (!toggle)
+                continue;
+            toggle.setAttribute('aria-label', message);
+            toggle.setAttribute('aria-pressed', String(dark));
+            toggle.title = message;
         }
-        catch { /* Storage may be unavailable in private browsing. */ }
-        applyTheme(value);
-        syncIcon();
-    });
-    // On phones the icon switches explicit light/dark modes; desktop retains system mode.
-    mobileToggle?.addEventListener('click', () => {
-        picker.value = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-        picker.dispatchEvent(new Event('change'));
-    });
-    darkMedia.addEventListener('change', () => {
-        if (picker.value === 'system')
-            applyTheme('system');
-        syncIcon();
-    });
+    };
+    applyTheme(getThemeMode());
+    syncIcons();
+    for (const toggle of toggles)
+        toggle?.addEventListener('click', () => {
+            const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+            try {
+                localStorage.setItem(THEME_KEY, next);
+            }
+            catch { /* Private browsing */ }
+            applyTheme(next);
+            syncIcons();
+        });
 }
 function init() {
     // Register navigation before complex initializers. A failure later must not
     // prevent opening Settings to investigate the startup problem.
+    $('nav-home').addEventListener('click', () => showView('home'));
+    $('manage-back-home').addEventListener('click', () => showView('home'));
+    $('import-back-home').addEventListener('click', () => showView('home'));
+    $('assets-back-home').addEventListener('click', () => showView('home'));
     $('nav-import').addEventListener('click', () => showView('import'));
-    $('nav-manage').addEventListener('click', () => { manageReturnToSummary = false; showView('manage'); });
+    $('nav-manage').addEventListener('click', () => { manageReturnToSummary = false; activeAnalysisDrilldown = null; showView('manage'); });
     $('nav-summary').addEventListener('click', () => showView('summary'));
+    $('nav-analysis').addEventListener('click', () => showView('analysis'));
+    $('nav-reports').addEventListener('click', () => showView('reports'));
+    $('nav-subscriptions').addEventListener('click', () => showView('subscriptions'));
     $('nav-rules').addEventListener('click', () => showView('rules'));
     $('nav-assets').addEventListener('click', () => showView('assets'));
     $('nav-future').addEventListener('click', () => showView('future'));
     $('nav-settings').addEventListener('click', () => showView('settings'));
+    $('import-payment-settings').addEventListener('click', () => showView('settings'));
     initPasswordFields();
     initTheme();
+    let sidebarCollapsed = false;
+    try {
+        sidebarCollapsed = window.localStorage.getItem('finance-sidebar-collapsed') !== '0';
+    }
+    catch {
+        sidebarCollapsed = true;
+    }
+    setDesktopMenuCollapsed(sidebarCollapsed);
+    document.documentElement.classList.remove('finance-nav-boot-collapsed');
+    document.getElementById('sidebar-collapse-toggle')?.addEventListener('click', () => {
+        setDesktopMenuCollapsed(!document.querySelector('.app-shell')?.classList.contains('nav-collapsed'));
+    });
+    const desktopSidebar = document.getElementById('finance-sidebar');
+    desktopSidebar?.addEventListener('pointerenter', event => {
+        if (event.pointerType === 'mouse')
+            scheduleDesktopMenuPeek();
+    });
+    desktopSidebar?.addEventListener('pointerleave', () => { closeDesktopMenuPeek(); });
+    desktopSidebar?.addEventListener('pointerover', event => {
+        if (event.pointerType !== 'mouse' || !document.querySelector('.app-shell.nav-collapsed:not(.nav-peeking)'))
+            return;
+        const target = event.target instanceof Element ? event.target.closest('[data-nav-label]') : null;
+        const tip = document.getElementById('sidebar-tooltip');
+        if (!tip || !target || !desktopSidebar.contains(target))
+            return;
+        const bounds = target.getBoundingClientRect();
+        tip.textContent = target.dataset.navLabel ?? '';
+        tip.style.left = `${Math.round(desktopSidebar.getBoundingClientRect().right + 9)}px`;
+        tip.style.top = `${Math.max(6, Math.min(window.innerHeight - 42, bounds.top + bounds.height / 2 - 18))}px`;
+        tip.hidden = false;
+    });
+    desktopSidebar?.addEventListener('pointerout', event => {
+        if (event.relatedTarget instanceof Node && event.target instanceof Element) {
+            const old = event.target.closest('[data-nav-label]');
+            const next = event.relatedTarget instanceof Element ? event.relatedTarget.closest('[data-nav-label]') : null;
+            if (old && old === next)
+                return;
+        }
+        hideSidebarTooltip();
+    });
+    desktopSidebar?.addEventListener('click', event => {
+        if (!(event.target instanceof Element && event.target.closest('.nav-entry')))
+            return;
+        const shell = document.querySelector('.app-shell');
+        if (shell?.classList.contains('nav-peek-closing'))
+            return;
+        if (shell?.classList.contains('nav-peeking'))
+            closeDesktopMenuPeek();
+        else
+            clearDesktopMenuPeek();
+    });
     const mobileToggle = document.getElementById('mobile-nav-toggle');
     const mobileBreakpoint = window.matchMedia('(max-width: 800px)');
     setMobileMenuOpen(false);
     mobileToggle?.addEventListener('click', () => {
         setMobileMenuOpen(!document.getElementById('finance-sidebar')?.classList.contains('mobile-open'));
     });
-    mobileBreakpoint.addEventListener('change', () => setMobileMenuOpen(false));
+    mobileBreakpoint.addEventListener('change', () => {
+        setMobileMenuOpen(false);
+        setDesktopMenuCollapsed(!!document.querySelector('.app-shell')?.classList.contains('nav-collapsed'));
+    });
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape' && document.getElementById('finance-sidebar')?.classList.contains('mobile-open')) {
             setMobileMenuOpen(false);
@@ -1798,19 +2437,59 @@ function init() {
             setMobileMenuOpen(false);
     });
     futureUi = initFutureProjection(() => !liveVault?.unlocked ? null : { assets: liveVault.assetSettings(), records: liveVault.records() });
+    cardSettingsUi = initCardSettings(() => liveVault, () => { render(); summaryUi?.render(); homeUi?.render(); analysisUi?.render(); });
     assetsUi = initAssetsSettings(() => liveVault, categories, message => {
         operationResult(message);
         summaryUi?.render();
         futureUi?.render();
-    }, () => summaryUi?.render());
+        homeUi?.render();
+        analysisUi?.render();
+    }, () => { summaryUi?.render(); homeUi?.render(); analysisUi?.render(); });
+    const homeSource = () => {
+        if (!liveVault?.unlocked)
+            return null;
+        return { records: liveVault.records(), rules: liveVault.merchantRules(),
+            categories: liveVault.merchantCategories(), assets: liveVault.assetSettings(),
+            payroll: assetsUi?.payrollSnapshot() ?? { ready: false, syncedAt: null, entries: [] } };
+    };
+    analysisSourceProvider = homeSource;
+    homeUi = initHome({ source: homeSource, navigate: (destination, recordId, drilldown) => {
+            activeAnalysisDrilldown = drilldown ?? null;
+            if (destination === 'manage' && recordId) {
+                const index = statements.findIndex(item => savedIds.get(item) === recordId);
+                if (index < 0) {
+                    toast('明細が見つかりません。OneDriveを更新してください。');
+                    return;
+                }
+                const billing = statements[index]?.billingMonth;
+                manageYear = billing && /^\d{4}-(0[1-9]|1[0-2])$/.test(billing) ? billing.slice(0, 4) : 'all';
+                manageMonth = manageYear === 'all' ? 'all' : billing.slice(5);
+                activeIndex = index;
+            }
+            homeNavigationPending = true;
+            showView(destination);
+        } });
+    analysisUi = initAnalysis({ source: homeSource, openMonth: (period) => { summaryUi?.setPeriod(period); showView('summary'); },
+        openDrilldown: (request) => {
+            if (!homeSource()) {
+                toast('先にOneDrive保管庫を解除してください。');
+                return;
+            }
+            analysisReturnPageY = window.scrollY;
+            const content = document.querySelector('.workspace > .content');
+            analysisReturnContentY = content?.scrollTop ?? 0;
+            activeAnalysisDrilldown = request;
+            manageReturnToSummary = false;
+            activeIndex = -1;
+            showView('manage');
+        }, openSettings: () => showView('settings') });
+    subscriptionsUi = initSubscriptions({ source: homeSource, vault: () => liveVault,
+        onSaved: () => { homeUi?.render(); }, openAccountSettings: () => showView('assets') });
+    reportsUi = initMonthlyReports({ source: homeSource, vault: () => liveVault, openMonth: (period) => { summaryUi?.setPeriod(period); showView('summary'); } });
     summaryUi = initMonthlySummary({
-        source: () => {
-            if (!liveVault?.unlocked)
-                return null;
-            return { records: liveVault.records(), rules: liveVault.merchantRules(),
-                categories: liveVault.merchantCategories(), assets: liveVault.assetSettings(),
-                payroll: assetsUi?.payrollSnapshot() ?? { ready: false, syncedAt: null, entries: [] } };
-        },
+        source: homeSource,
+        openReport: (period) => { reportsUi?.openPeriod(period); showView('reports'); },
+        openRecurring: openRecurringForReview,
         openRecord: (id) => {
             const index = statements.findIndex(s => savedIds.get(s) === id);
             if (index < 0) {
@@ -1853,12 +2532,13 @@ function init() {
             }
         })();
     });
+    initLegacyCleanup();
     initCloudSettings({
-        hasUnsavedChanges: () => Boolean(pending().length || failedImports.length || assetsUi?.isDirty() || assetsUi?.isBusy() || rulesBusy || categorySaving || batchBusy || filesBusy || autoSaveTimer),
+        hasUnsavedChanges: () => Boolean(pending().length || failedImports.length || assetsUi?.isDirty() || assetsUi?.isBusy() || subscriptionsUi?.isBusy() || cardSettingsUi?.isDirty() || cardSettingsUi?.isBusy() || rulesBusy || categorySaving || batchBusy || filesBusy),
         onChangePassphrase: async (current, next, onProgress) => {
             if (!liveVault?.unlocked)
                 throw new Error('先にOneDrive保管庫をロック解除してください。');
-            if (pending().length || failedImports.length || assetsUi?.isBusy() || assetsUi?.isDirty() || statements.some(s => hasUnsavedChanges(s)) || rulesBusy || categorySaving || batchBusy || filesBusy || autoSaveTimer)
+            if (pending().length || failedImports.length || assetsUi?.isBusy() || assetsUi?.isDirty() || subscriptionsUi?.isBusy() || cardSettingsUi?.isBusy() || cardSettingsUi?.isDirty() || statements.some(s => hasUnsavedChanges(s)) || rulesBusy || categorySaving || batchBusy || filesBusy)
                 throw new Error('未保存の明細・編集中のデータがあります。保存または破棄してから変更してください。');
             await liveVault.changePassphrase(current, next, onProgress);
             clearRememberedKey();
@@ -1866,26 +2546,34 @@ function init() {
             renderRules();
             assetsUi?.render();
             futureUi?.render();
+            cardSettingsUi?.render();
             updateCloudStatus('OneDrive：新しい暗号化パスフレーズに更新しました。');
             operationResult('暗号化パスフレーズを変更しました。すべての有効データを新しい鍵で再暗号化しました。');
         },
         onRefresh: refreshCloud,
         onMigration: migrateLegacy,
         onLock: () => {
-            if (liveVault?.isRotating || assetsUi?.isBusy())
+            if (liveVault?.isRotating || assetsUi?.isBusy() || subscriptionsUi?.isBusy() || cardSettingsUi?.isBusy())
                 return false;
-            if ((pending().length || assetsUi?.isDirty()) && !window.confirm('未保存の編集があります。破棄してロックしますか？'))
+            if ((pending().length || assetsUi?.isDirty() || cardSettingsUi?.isDirty()) && !window.confirm('未保存の編集があります。破棄してロックしますか？'))
                 return false;
             clearRememberedKey();
+            activeAnalysisDrilldown = null;
+            drilldownRows.clear();
             liveVault?.lock();
             summaryUi?.reset();
             futureUi?.reset();
+            homeUi?.reset();
+            analysisUi?.reset();
+            reportsUi?.reset();
+            subscriptionsUi?.reset();
             statements.splice(0);
             failedImports.splice(0);
             activeIndex = -1;
             render();
             renderRules();
             assetsUi?.reset();
+            cardSettingsUi?.reset();
             updateCloudStatus();
             return true;
         },
@@ -1896,6 +2584,21 @@ function init() {
             renderRows();
         });
     }
+    $('manage-back-analysis').addEventListener('click', () => {
+        showView('analysis');
+        const content = document.querySelector('.workspace > .content');
+        if (content)
+            content.scrollTop = analysisReturnContentY;
+        window.scrollTo(0, analysisReturnPageY);
+    });
+    $('manage-drilldown-clear').addEventListener('click', () => {
+        activeAnalysisDrilldown = null;
+        drilldownRows.clear();
+        activeIndex = -1;
+        selectVisibleManagerStatement();
+        renderManager();
+        $('manage-back-analysis').classList.add('hidden');
+    });
     $('manage-back-summary').addEventListener('click', () => {
         showView('summary');
         const content = document.querySelector('.workspace .content');
@@ -1985,8 +2688,6 @@ function init() {
     $('batch-import').addEventListener('click', () => { void saveAllPending(); });
     $('manage-save').addEventListener('click', () => { const s = active(); if (s) {
         if (savedIds.has(s)) {
-            if (autoSaveTimer)
-                clearTimeout(autoSaveTimer);
             void saveEditedStatement(s, true);
         }
         else
@@ -1996,13 +2697,6 @@ function init() {
         void deleteStatement(activeIndex); });
     $('manage-add-row').addEventListener('click', () => { const s = active(); if (!s)
         return; s.rows.push({ id: crypto.randomUUID(), usedOn: new Date().toISOString().slice(0, 10), merchant: '', amount: 0 }); markDirty(s); });
-    $('manage-month').addEventListener('change', e => { const s = active(); if (!s)
-        return; s.billingMonth = e.target.value || null; if (s.billingMonth && manageYear !== 'all') {
-        manageYear = s.billingMonth.slice(0, 4);
-        manageMonth = 'all';
-    } markDirty(s); });
-    $('manage-payment').addEventListener('change', e => { const s = active(); if (!s)
-        return; const val = e.target.value.trim().replace(/\//g, '-'); s.paymentDate = val || null; markDirty(s); });
     $('file-input').addEventListener('change', event => {
         const input = event.target;
         if (input.files)
@@ -2024,13 +2718,33 @@ function init() {
     });
     const pasteInput = $('paste-input');
     pasteInput.addEventListener('paste', event => { clipboardHtml = event.clipboardData?.getData('text/html') ?? ''; });
+    $('import-rakuten-choice').addEventListener('change', event => {
+        const input = event.target;
+        if (!(input instanceof HTMLInputElement) || input.type !== 'radio')
+            return;
+        const s = importActive();
+        if (!s || s.provider !== 'rakuten' || !['rakuten-etc', 'rakuten-mizuho'].includes(input.value))
+            return;
+        s.cardId = input.value;
+        markDirty(s);
+    });
+    $('import-smbc-choice').addEventListener('change', event => {
+        const input = event.target;
+        if (!(input instanceof HTMLInputElement) || input.type !== 'radio')
+            return;
+        const s = importActive();
+        if (!s || s.provider !== 'smbc' || s.sourceKind === 'csv' || !['smbc-nl', 'amazon'].includes(input.value))
+            return;
+        s.cardId = input.value;
+        markDirty(s);
+    });
     $('parse-paste').addEventListener('click', () => {
         if (!pasteInput.value.trim()) {
             toast('明細を貼り付けてください。');
             return;
         }
         const s = parseStatementText(pasteInput.value, 'paste', 'Web明細の貼り付け', clipboardHtml);
-        acceptStatement(s); // Web paste saves the parsed rows; the raw copied text is not retained.
+        void acceptStatement(s).catch(error => toast(error instanceof Error ? error.message : '差し替えを確認できませんでした。')); // Raw pasted text is never stored.
         // Remove unnecessary copies from the textarea; the parsed draft lives only in memory.
         pasteInput.value = '';
         clipboardHtml = '';
@@ -2126,6 +2840,7 @@ function init() {
                 renderRules();
                 assetsUi?.render();
                 futureUi?.render();
+                cardSettingsUi?.render();
                 void assetsUi?.refreshPayroll();
                 updateCloudStatus();
                 await refreshVaultControls();
@@ -2141,16 +2856,15 @@ function init() {
         })();
     });
     const lastView = readLastView(sessionStorageSafe());
-    if (lastView)
-        showView(lastView);
+    showView(lastView ?? 'home');
     void refreshVaultControls();
     render();
     document.documentElement.dataset.financeReady = 'true';
     void startCloud();
-    window.addEventListener('focus', () => { if (liveVault?.unlocked && !liveVault.isRotating && !pending().length && !batchBusy)
+    window.addEventListener('focus', () => { if (liveVault?.unlocked && !liveVault.isRotating && !pending().length && !batchBusy && !subscriptionsUi?.isBusy())
         void refreshCloud().catch(error => updateCloudStatus(`更新確認失敗：${error instanceof Error ? error.message : '通信エラー'}`)); });
     window.addEventListener('beforeunload', event => {
-        if (batchBusy || pending().length || liveVault?.isRotating || assetsUi?.isBusy() || assetsUi?.isDirty()) {
+        if (batchBusy || pending().some(s => !importStaged.has(s)) || liveVault?.isRotating || subscriptionsUi?.isBusy() || assetsUi?.isBusy() || assetsUi?.isDirty() || subscriptionsUi?.isBusy() || cardSettingsUi?.isBusy() || cardSettingsUi?.isDirty()) {
             event.preventDefault();
             event.returnValue = '';
         }

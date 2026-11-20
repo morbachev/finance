@@ -1,0 +1,65 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {CARDS} from '../dist/src/models/types.js';
+const html=readFileSync(new URL('../public/index.html',import.meta.url),'utf8');
+const css=readFileSync(new URL('../public/styles/settings-v194.css',import.meta.url),'utf8');
+const chevronCss=readFileSync(new URL('../public/styles/ui-v152.css',import.meta.url),'utf8');
+const cards=readFileSync(new URL('../src/ui/card-settings.ts',import.meta.url),'utf8');
+const main=readFileSync(new URL('../src/main.ts',import.meta.url),'utf8');
+const boot=readFileSync(new URL('../public/scripts/theme-boot.js',import.meta.url),'utf8');
+const assets=readFileSync(new URL('../src/ui/assets-settings.ts',import.meta.url),'utf8');
+
+test('statement routes are flat and appearance is explicit and icon only on both layouts',()=>{
+  assert.doesNotMatch(html,/id="nav-statements-group"/);
+  assert.match(html,/id="nav-import"/);
+  assert.match(html,/id="nav-manage"/);
+  assert.match(html,/id="desktop-theme-toggle"/);
+  assert.match(html,/id="mobile-theme-toggle"/);
+  assert.doesNotMatch(html,/id="theme-mode"|value="system"/);
+  assert.match(main,/localStorage\.setItem\(THEME_KEY,next\)/);
+  assert.match(boot,/localStorage\.getItem\('finance-theme'\) === 'dark'/);
+  assert.doesNotMatch(boot,/prefers-color-scheme/);
+});
+test('settings use closed disclosures with one CSS chevron, NISA has footer warning and no count',()=>{
+  const nisa=html.match(/<details class="panel settings-nisa-panel settings-disclosure"[^>]+>/)?.[0];
+  const cardsSummary=html.match(/<details class="panel settings-card-disclosure"[^>]+>/)?.[0];
+  const payroll=html.match(/<details class="panel assets-payroll-panel settings-payroll-disclosure"[^>]+>/)?.[0];
+  assert.ok(nisa&&cardsSummary&&payroll);
+  assert.doesNotMatch(nisa,/\sopen\b/);
+  assert.doesNotMatch(cardsSummary,/\sopen\b/);
+  assert.doesNotMatch(payroll,/\sopen\b/);
+  assert.match(html,/<summary>NISA連携<\/summary>/);
+  assert.doesNotMatch(html,/settings-payroll-chevron|cloud-advanced-icon|class="cloud-chevron"/);
+  const actions=html.indexOf('id="assets-nisa-save"');
+  const warning=html.indexOf('カード積立と定期入金を重複登録しないようご確認ください。');
+  assert.ok(warning>actions);
+  assert.match(html,/id="assets-nisa-match-count"[^>]*\bhidden\b/);
+  assert.doesNotMatch(assets,/保存済みの該当明細：/);
+  assert.match(chevronCss,/> summary::after/);
+  assert.match(chevronCss,/transform:none!important;transition:none!important/);
+  assert.doesNotMatch(css,/summary::after\{/);
+});
+test('card settings use one flat panel with CSV payment, bank account, point rate and optional notice',()=>{
+  assert.match(cards,/radio\.type='radio'/);
+  assert.match(cards,/selectedCardId=id/);
+  assert.match(cards,/row\.panel\.hidden=key!==id/);
+  assert.match(cards,/CSV明細の引落日/);
+  assert.match(cards,/field\('引落口座',debit\)/);
+  assert.match(cards,/field\('還元率（%）',rate\)/);
+  assert.match(cards,/ホームの明細確定案内/);
+  assert.doesNotMatch(cards,/この日付はホームの通知用/);
+  assert.match(cards,/if\(prior\[card\.id\]\?\.issuer\)/);
+  assert.match(cards,/setCardConfiguration\(next,nextDebit\)/);
+  assert.doesNotMatch(cards,/document\.createElement\('details'\)/);
+  assert.doesNotMatch(cards,/カード会社（目安）/);
+  assert.match(css,/card-setting-item\[hidden\]\{display:none!important\}/);
+  assert.equal(CARDS.find(c=>c.id==='rakuten-etc').name,'楽天カード');
+});
+test('analysis-to-management breakdown enables normal page scrolling rather than fixed viewport clipping',()=>{
+  assert.match(main,/classList\.toggle\('manage-with-drilldown',!!activeAnalysisDrilldown\)/);
+  const drilldown=readFileSync(new URL('../public/styles/drilldown-v190.css',import.meta.url),'utf8');
+  assert.match(drilldown,/#manage-view\.manage-with-drilldown:not\(\.hidden\)/);
+  assert.match(drilldown,/overflow-y:auto/);
+  assert.doesNotMatch(css,/#manage-view\.manage-with-drilldown:not\(\.hidden\)/);
+});

@@ -25,16 +25,13 @@ test('forecast keeps annual return control, but derives baseline NISA from recor
   assert.match(future,/suggestedNisaMonthly\(source.assets,source.records,localToday\(\)\)/);
   assert.match(future,/nisaMonthly:hasNisaSchedule\?0:suggested.amount/);
 });
-test('NISA linkage and birth month live in settings, distinct from bank debit mapping',()=>{
-  const start=html.indexOf('<details class="assets-links-panel panel" id="assets-card-links">');
-  const end=html.indexOf('</details>',start);
-  const section=html.slice(start,end);
-  assert.ok(start>0&&end>start);
-  assert.doesNotMatch(section,/id="assets-nisa-link-form"/);
-  assert.match(section,/id="assets-card-debits-form"/);
+test('NISA linkage stays in settings and card debit mapping moves into card settings form',()=>{
+  assert.doesNotMatch(html,/id="assets-card-debits-form"/);
+  assert.doesNotMatch(html,/id="assets-card-links"/);
   const settings=html.slice(html.indexOf('id="settings-nisa-panel"'),html.indexOf('class="panel assets-payroll-panel"'));
   assert.match(settings,/id="assets-nisa-link-form"/);
   assert.match(settings,/id="assets-birth-form"/);
+  assert.match(settings,/id="settings-card-form"/);
   assert.match(settings,/id="assets-nisa-save"/);
   assert.match(settings,/id="assets-birth-save"/);
   assert.match(css,/\.assets-links-panel:not\(\[open\]\)>\.assets-links-grid\{display:none!important\}/);

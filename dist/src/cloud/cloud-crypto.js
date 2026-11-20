@@ -131,3 +131,32 @@ export async function decryptAssets(text, key, expectedSalt) {
         throw new Error('資産設定の復号または整合性確認に失敗しました。');
     }
 }
+/** A separate AES-GCM authentication domain per archived reporting month. */
+export async function encryptMonthlyReport(doc, key, salt) {
+    const valid = (await import('../reports/monthly-report.js')).validateReportDocument(doc);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const domain = enc.encode(`Finance monthly report v1:${valid.period}`);
+    const payload = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: domain }, key, enc.encode(JSON.stringify(valid)));
+    return JSON.stringify({ format: 'finance-monthly-report-envelope-v1', period: valid.period, salt, iterations: ITERATIONS, iv: b64(iv), data: b64(new Uint8Array(payload)) });
+}
+export async function decryptMonthlyReport(text, key, salt, period) {
+    if (text.length > 2_000_000)
+        throw new Error('月次レポートの容量が大きすぎます。');
+    let env;
+    try {
+        env = JSON.parse(text);
+    }
+    catch {
+        throw new Error('月次レポートの暗号形式が不正です。');
+    }
+    if (env?.format !== 'finance-monthly-report-envelope-v1' || env.period !== period || env.salt !== salt || env.iterations !== ITERATIONS || un64(env.iv).length !== 12)
+        throw new Error('月次レポートの暗号形式が不正です。');
+    try {
+        const data = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: un64(env.iv), additionalData: enc.encode(`Finance monthly report v1:${period}`) }, key, un64(env.data));
+        const { validateReportDocument } = await import('../reports/monthly-report.js');
+        return validateReportDocument(JSON.parse(dec.decode(data)), period);
+    }
+    catch {
+        throw new Error('月次レポートを復号できませんでした。');
+    }
+}

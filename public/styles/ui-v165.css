@@ -1,17 +1,5 @@
 /* Finance v1.6.5: mobile navigation continuity, native scroll chaining and consistent choices. */
 
-/* Scroll the history itself while there are entries, then naturally continue
-   scrolling the surrounding Settings page at either end of the list. */
-.settings-view .assets-payroll-history-card .assets-payroll-summary-body {
-  overscroll-behavior-y: auto !important;
-}
-/* With no history, the otherwise empty scrollbox must not capture gestures. */
-@media (max-width: 800px) {
-  .settings-view .assets-payroll-history-card:has(#assets-payroll-months:empty) .assets-payroll-summary-body {
-    overflow-y: clip !important;
-  }
-}
-
 /* Match the existing bordered radio cards used by rules and card settings. */
 .assets-once-dialog .assets-once-choice {
   display: flex;

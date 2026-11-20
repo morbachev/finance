@@ -1,6 +1,6 @@
 /** Last opened Finance menu, tab-scoped. No account or financial data is stored. */
 export const VIEW_STORAGE_KEY = 'finance.ui.last-view.v1';
-export const FINANCE_VIEWS = ['import', 'manage', 'summary', 'rules', 'assets', 'future', 'settings'];
+export const FINANCE_VIEWS = ['home', 'import', 'manage', 'summary', 'analysis', 'subscriptions', 'reports', 'rules', 'assets', 'future', 'settings'];
 export function readLastView(storage) {
     try {
         const stored = storage?.getItem(VIEW_STORAGE_KEY);

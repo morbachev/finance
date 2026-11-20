@@ -276,3 +276,20 @@ export async function restoreEncryptedBackup(file: File, passphrase: string): Pr
   });
   key = testKey;
 }
+
+/** Explicitly remove only the historical Finance IndexedDB after external verification. */
+export async function deleteLegacyVault():Promise<void> {
+  lockVault();
+  const previous=cachedDb;
+  cachedDb=null;
+  if(previous){
+    // No other transaction should be running when the caller reaches here.
+    try{(await previous).close();}catch{/* Opening failed; deletion can still proceed. */}
+  }
+  await new Promise<void>((resolve,reject)=>{
+    const request=indexedDB.deleteDatabase(DB_NAME);
+    request.onsuccess=()=>resolve();
+    request.onerror=()=>reject(request.error??new Error('旧保管庫を削除できませんでした。'));
+    request.onblocked=()=>reject(new Error('別のタブで旧データが開かれています。ほかのFinanceタブを閉じてください。'));
+  });
+}

@@ -42,10 +42,6 @@
 }
 .settings-view .assets-payroll-history-card .assets-payroll-metrics>div{padding:8px;min-width:0}
 .settings-view .assets-payroll-history-card .assets-payroll-metrics strong{font-size:11px}
-.settings-view .assets-payroll-history-card .assets-payroll-months{max-height:none;overflow:visible}
-.settings-view .assets-payroll-history-card .assets-payroll-month{padding:8px;font-size:11px}
-.settings-view .assets-payroll-history-card .assets-payroll-metrics:has(strong:empty){display:none}
-.settings-view .assets-payroll-history-card .assets-payroll-months:empty{display:none}
 
 /* Connection and passphrase forms are two normal, always-visible cards. */
 .settings-view #cloud-view.settings-cloud-section{

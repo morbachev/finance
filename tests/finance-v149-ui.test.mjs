@@ -8,13 +8,13 @@ const monthly=readFileSync(new URL('src/ui/monthly-summary.ts',root),'utf8');
 const css=readFileSync(new URL('public/styles/layout-v149.css',root),'utf8');
 const sidebar=html.slice(html.indexOf('<aside id="finance-sidebar" class="sidebar">'),html.indexOf('</aside>'));
 
-test('sidebar groups statement routes, and both settings and Payroll are anchored at its bottom',()=>{
-  assert.match(sidebar,/<details id="nav-statements-group"[^>]*open>/);
+test('sidebar exposes both statement routes directly, with settings and Payroll at bottom',()=>{
+  assert.doesNotMatch(sidebar,/id="nav-statements-group"/);
   assert.match(sidebar,/id="mobile-nav-toggle"/);
-  const group=sidebar.slice(sidebar.indexOf('id="nav-statements-group"'),sidebar.indexOf('</details>'));
-  for(const name of ['nav-import','nav-manage'])assert.equal(group.split(`id="${name}"`).length-1,1);
-  assert.match(group,/id="nav-manage"[^>]*>[\s\S]*?明細管理<\/button>/);
-  assert.match(sidebar,/id="nav-rules"[^>]*>[\s\S]*?ルール<\/button>/);
+  for(const name of ['nav-import','nav-manage'])assert.equal(sidebar.split(`id="${name}"`).length-1,1);
+  assert.ok(sidebar.indexOf('id="nav-import"')<sidebar.indexOf('id="nav-manage"'));
+  assert.match(sidebar,/id="nav-manage"[^>]*>[\s\S]*?<span class="nav-text">明細管理<\/span><\/button>/);
+  assert.match(sidebar,/id="nav-rules"[^>]*>[\s\S]*?<span class="nav-text">ルール<\/span><\/button>/);
   const bottom=sidebar.slice(sidebar.indexOf('class="sidebar-bottom-actions"'),sidebar.indexOf('class="sidebar-footer"'));
   assert.match(bottom,/id="nav-settings"/);
   assert.match(bottom,/id="nav-payroll"[^>]*target="_blank"[^>]*rel="noopener noreferrer"/);

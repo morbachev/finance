@@ -23,12 +23,14 @@ test('account management and recurring payments reside in their own route, not a
   assert.match(main,/\$\('nav-assets'\)\.addEventListener/);
   assert.match(assets,/\$\('assets-page'\)\.classList\.contains\('hidden'\)/);
 });
-test('appearance control is located at the bottom of sidebar, not settings',()=>{
-  const theme=html.indexOf('id="theme-mode"'), footer=html.indexOf('class="sidebar-footer"');
+test('desktop and mobile use explicit theme toggle icons, with no system-mode select',()=>{
+  const footer=html.indexOf('class="sidebar-footer"');
+  const theme=html.indexOf('id="desktop-theme-toggle"');
   assert.ok(theme>footer && theme<sidebarEnd);
-  assert.equal(html.split('id="theme-mode"').length-1,1);
-  assert.doesNotMatch(html.slice(settingsStart),/id="theme-mode"/);
-  for(const value of ['system','light','dark'])assert.match(html.slice(footer,sidebarEnd),new RegExp(`<option value="${value}"`));
+  assert.equal(html.split('id="desktop-theme-toggle"').length-1,1);
+  assert.match(html,/id="mobile-theme-toggle"/);
+  assert.doesNotMatch(html,/id="theme-mode"|端末の設定に合わせる/);
+  assert.match(main,/localStorage\.setItem\(THEME_KEY,next\)/);
 });
 test('expanding one history cannot stretch adjacent account cards',()=>{
   assert.match(css,/\.assets-account-layout\{align-items:start\}/);

@@ -13,7 +13,7 @@ const store=()=>{
 };
 
 test('v1.6.5 last menu is remembered per tab and restored across reloads',()=>{
-  assert.deepEqual(FINANCE_VIEWS,['import','manage','summary','rules','assets','future','settings']);
+  assert.deepEqual(FINANCE_VIEWS,['home','import','manage','summary','analysis','subscriptions','reports','rules','assets','future','settings']);
   const storage=store();
   assert.equal(readLastView(storage),null);
   for(const view of FINANCE_VIEWS){
@@ -30,7 +30,7 @@ test('v1.6.5 last menu is remembered per tab and restored across reloads',()=>{
 });
 
 test('initial route restores stored selection and cloud failures do not override it',()=>{
-  assert.match(main,/const lastView = readLastView\(sessionStorageSafe\(\)\);\s*if \(lastView\) showView\(lastView\);/);
+  assert.match(main,/const lastView = readLastView\(sessionStorageSafe\(\)\);\s*showView\(lastView\?\?'home'\);/);
   assert.match(main,/function showView\(view: FinanceView\)[\s\S]*?saveLastView\(sessionStorageSafe\(\), view\);/);
   assert.equal((main.match(/if \(!readLastView\(sessionStorageSafe\(\)\)\) showView\('settings'\);/g)||[]).length,2);
   assert.match(main,/manage-back-summary[\s\S]*?scrollTop=summaryReturnContentY;[\s\S]*?scrollTo\(0,summaryReturnPageY\)/);
@@ -49,9 +49,12 @@ test('every cloud-named save button becomes 保存 without changing save handler
   assert.match(assets,/await requireVault\(\)\.upsertRecurring\(entry\)/);
 });
 
-test('Payroll history scroll chains to Settings page at ends and no data does not trap touch',()=>{
-  assert.match(css,/assets-payroll-history-card \.assets-payroll-summary-body\s*\{\s*overscroll-behavior-y: auto !important;/);
-  assert.match(css,/:has\(#assets-payroll-months:empty\) \.assets-payroll-summary-body\s*\{\s*overflow-y: clip !important;/);
+test('Payroll sync summary has just count and last sync without a scroll history',()=>{
+  assert.doesNotMatch(html,/id="assets-payroll-months"/);
+  assert.match(html,/id="assets-payroll-count"/);
+  assert.match(html,/id="assets-payroll-last"/);
+  assert.doesNotMatch(assets,/incomeByMonth\(/);
+  assert.doesNotMatch(css,/assets-payroll-months/);
 });
 
 test('both one-off transaction radio groups have bordered checked-state options on mobile',()=>{

@@ -1,5 +1,5 @@
 /** Read-only asset forecast: no remote writes, guessed debit accounts, or future salary estimates. */
-import { ASSET_ACCOUNTS, oneTimeAccountDelta, recurringCoveredByOneTime } from './assets.js';
+import { ASSET_ACCOUNTS, oneTimeAccountDelta, recurringCoveredByOneTime, nisaRuleOnDay } from './assets.js';
 import { recurringOccursOn } from './recurring-schedule.js'; /* finance-monthly-v142 */
 import { depositedIncomeBetween } from './payroll-income.js';
 function dayString(date) {
@@ -25,19 +25,16 @@ function accountDelta(entry, account) {
     return 0;
 }
 export function matchingNisaRows(doc, records) {
-    const rule = doc.nisaCardRule;
-    if (!rule?.enabled)
-        return [];
-    const term = rule.merchantContains.normalize('NFKC').toLocaleLowerCase();
     const seen = new Set();
     const matches = [];
     for (const record of records) {
-        if (record.statement.cardId !== rule.cardId)
-            continue;
         for (const row of record.statement.rows) {
             const date = row.usedOn;
-            if (!validDay(date) || !Number.isSafeInteger(row.amount) || row.amount <= 0 ||
-                !row.merchant.normalize('NFKC').toLocaleLowerCase().includes(term))
+            if (!validDay(date) || !Number.isSafeInteger(row.amount) || row.amount <= 0)
+                continue;
+            const rule = nisaRuleOnDay(doc, date);
+            if (!rule?.enabled || record.statement.cardId !== rule.cardId ||
+                !row.merchant.normalize('NFKC').toLocaleLowerCase().includes(rule.merchantContains.normalize('NFKC').toLocaleLowerCase()))
                 continue;
             const id = `${record.id}:${row.id}`;
             if (seen.has(id))

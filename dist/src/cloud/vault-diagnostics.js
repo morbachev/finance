@@ -1,4 +1,4 @@
-import { parseIndexEnvelope, parseEnvelope, deriveCloudKey, decryptIndex, decryptDocument, decryptRules, decryptAssets } from './cloud-crypto.js';
+import { parseIndexEnvelope, parseEnvelope, deriveCloudKey, decryptIndex, decryptDocument, decryptRules, decryptAssets, decryptMonthlyReport } from './cloud-crypto.js';
 function details(error) {
     // Do not copy raw exception text: Graph URLs, response bodies and file IDs are private.
     if (error instanceof SyntaxError)
@@ -157,6 +157,43 @@ export async function diagnoseVaultFiles(client, passphrase = '', onProgress) {
         catch (error) {
             failures++;
             lines.push(`${label}：失敗［${details(error)}］`);
+        }
+    }
+    // The report archive is independent of the statement index and is optional on older installs.
+    if (typeof client.listMonthlyReports === 'function') {
+        let refs;
+        try {
+            refs = await client.listMonthlyReports();
+            lines.push(`月次レポート：${refs.length}件`);
+        }
+        catch (error) {
+            lines.push(`月次レポート一覧：失敗［${details(error)}］`);
+            return { ok: false, report: lines.join('\n') };
+        }
+        for (const ref of refs) {
+            onProgress?.(`${ref.period}のレポートを検査中…`);
+            try {
+                const file = await client.readMonthlyReport(ref.period);
+                if (!file || file.etag !== ref.etag)
+                    throw new Error('更新情報が一致しません。');
+                const fileSalt = indexDecryptionFailed ? JSON.parse(file.text).salt : index.salt;
+                if (typeof fileSalt !== 'string')
+                    throw new Error('暗号形式が不正です。');
+                basicEnvelope(file.text, 'finance-monthly-report-envelope-v1', fileSalt);
+                if (decryptKey) {
+                    if (indexDecryptionFailed)
+                        independentChecks++;
+                    const key = indexDecryptionFailed ? await deriveCloudKey(passphrase, fileSalt) : decryptKey;
+                    await decryptMonthlyReport(file.text, key, fileSalt, ref.period);
+                    if (indexDecryptionFailed)
+                        independentSuccesses++;
+                }
+                lines.push(`${ref.period}：正常（${decryptKey ? '復号・整合性' : '暗号形式'}）`);
+            }
+            catch (error) {
+                failures++;
+                lines.push(`${ref.period}：失敗［${details(error)}］`);
+            }
         }
     }
     if (indexDecryptionFailed) {

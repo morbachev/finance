@@ -141,11 +141,13 @@ test('asset conflict details show record/date and values, but redact credentials
 
 test('form dirty guards are independent and included in beforeunload tracking',async()=>{
  const ui=await readFile(new URL('../src/ui/assets-settings.ts',import.meta.url),'utf8');
- assert.match(ui,/let cardDebitAccountsDirty=false,mizuhoPlanDirty=false/);
+ assert.match(ui,/let mizuhoPlanDirty=false/);
  assert.match(ui,/if\(!mizuhoPlanDirty\)/);
  assert.match(ui,/'mizuho-plan-form'\)\.addEventListener\('input'/);
  assert.doesNotMatch(ui,/setMizuhoTransferPlan\(plan\);\s*cardDebitAccountsDirty=false/);
- assert.match(ui,/isDirty:\(\)=>[^;]*cardDebitAccountsDirty\|\|mizuhoPlanDirty/);
+ assert.match(ui,/isDirty:\(\)=>[^;]*mizuhoPlanDirty/);
+ const cardSettings=await readFile(new URL('../src/ui/card-settings.ts',import.meta.url),'utf8');
+ assert.match(cardSettings,/isDirty:\(\)=>dirty/);
 });
 
 test('explicit approval honors local deletion against a remote edited statement',async()=>{

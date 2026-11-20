@@ -23,6 +23,6 @@ test('OneDriveの通常画面は状態・主要操作を表示し設定・テス
   for(const id of ['cloud-status','cloud-folder-check','cloud-live-migrate','cloud-upload','cloud-download','cloud-login','cloud-logout','cloud-account','cloud-live-status']){
     assert.equal((html.match(new RegExp(`id="${id}"`,'g'))??[]).length,1,`${id} should exist once`);
   }
-  assert.match(main,/\$\('cloud-live-bar'\)\.classList\.toggle\('hidden', view === 'settings'\)/);
+  assert.match(main,/\$\('cloud-live-bar'\)\.classList\.add\('hidden'\)/);
   assert.match(cloud,/if\(!validId\(id\)\) \$<HTMLDetailsElement>\('cloud-advanced'\)\.open=true/);
 });

@@ -17,7 +17,6 @@
 .settings-view .assets-payroll-layout>form .assets-operation-status{margin:0!important;line-height:1.45}
 .settings-view .assets-payroll-layout>form .assets-payroll-actions{margin:0}
 .settings-view .assets-payroll-history-card .assets-payroll-summary-body{padding-bottom:4px;border:0!important}
-.settings-view .assets-payroll-history-card .assets-payroll-month:last-child{border-bottom:0}
 
 /* The password fields must use the whole width of their respective cards. */
 .settings-view .cloud-dev-test .cloud-dev-content,

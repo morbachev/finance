@@ -1,13 +1,15 @@
 {
   "name": "finance-importer-starter",
-  "version": "1.6.16",
+  "version": "1.9.11",
   "private": true,
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
     "build": "node scripts/clean-dist.mjs && tsc && node scripts/copy-static.mjs && node scripts/build-msal.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
-    "verify:cloud": "node scripts/check-cloud-asset.mjs"
+    "verify:cloud": "node scripts/check-cloud-asset.mjs",
+    "audit:staged": "node scripts/audit-publication.mjs --staged",
+    "audit:tree": "node scripts/audit-publication.mjs --tree"
   },
   "devDependencies": {
     "typescript": "5.9.3",

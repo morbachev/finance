@@ -1,6 +1,7 @@
 import { createEncryptedProbe, decryptEncryptedProbe } from './test-envelope.js';
 import { OneDriveTestClient, GraphError } from './onedrive-api.js';
 import { clearPasswordField } from '../ui/password-fields.js';
+import { showActivity, simpleActivity } from '../ui/activity-feedback.js';
 import { diagnoseVaultFiles } from './vault-diagnostics.js';
 const CLIENT_KEY='finance-onedrive-public-client-id-v1';
 const SCOPES=['Files.ReadWrite.AppFolder'];
@@ -23,15 +24,11 @@ let initializing:Promise<MsalInstance>|null=null;
 let activeId='';let busy=false;let verified=false;
 let reauthenticationRequired=false; /* finance-v146-noninteractive-check */
 const account=():MsalAccount|null=>msal?.getActiveAccount()??msal?.getAllAccounts()[0]??null;
-let cloudStatusTimer:ReturnType<typeof setTimeout>|undefined; /* finance-settings-v144 */
 function status(text:string,kind:'ok'|'error'|'neutral'='neutral') {
   const el=$('cloud-status');
-  if(cloudStatusTimer){clearTimeout(cloudStatusTimer);cloudStatusTimer=undefined;}
-  el.textContent=text;
-  el.className=`cloud-status ${kind}${text?'':' hidden'}`;
-  if(text&&kind!=='error')cloudStatusTimer=setTimeout(()=>{
-    el.classList.add('hidden');cloudStatusTimer=undefined;
-  },5000);
+  el.textContent='';
+  el.className='cloud-status hidden';
+  if(text)simpleActivity(text,kind==='error');
 }
 function updateUi():void {
   const id=$<HTMLInputElement>('cloud-client-id').value.trim();const connected=!!account()&&activeId===id;
@@ -216,14 +213,14 @@ export function initCloudSettings(handlers:CloudHandlers):void {
     button.disabled=true;
     message.className='cloud-status';
     try{
-      await handlers.onChangePassphrase(current,next,text=>{message.textContent=text;});
+      await handlers.onChangePassphrase(current,next,text=>{message.textContent='';showActivity(text,'working');});
       for(const id of ['cloud-current-secret','cloud-next-secret','cloud-next-confirm'])clearPasswordField(id);
-      message.textContent='新しいパスフレーズへの変更が完了しました。別端末では新しいパスフレーズで解除してください。';
+      message.textContent='';
       message.className='cloud-status ok';
       // The passphrase form stays visible after successful changes. /* finance-v145 */
       status('暗号化パスフレーズを変更しました。','ok');
     }catch(error){
-      message.textContent=`変更失敗：${error instanceof Error?error.message:'不明なエラー'}`;
+      message.textContent='';
       message.className='cloud-status error';
       throw error;
     }finally{

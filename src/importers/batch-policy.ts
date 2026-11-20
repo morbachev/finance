@@ -19,6 +19,24 @@ export function importErrors(statement: ParsedStatement, hasPdf: boolean): strin
   return issues;
 }
 
+/** Ambiguous PDF/paste card identity is a normal user choice, not an error.
+ * CSV imports have issuer metadata and must never silently become a pending choice. */
+export function cardSelectionPending(statement: ParsedStatement): boolean {
+  return statement.cardId === null && (
+    statement.provider === 'rakuten' ||
+    (statement.provider === 'smbc' && statement.sourceKind !== 'csv')
+  );
+}
+
+/** Only genuine validation problems belong in red error messaging.
+ * Full importErrors stays strict so an unselected card can NEVER be saved. */
+export function importDisplayErrors(statement: ParsedStatement, hasPdf: boolean): string[] {
+  const errors = importErrors(statement, hasPdf);
+  return cardSelectionPending(statement)
+    ? errors.filter(error => error !== 'カード種別が不明です')
+    : errors;
+}
+
 export function duplicateMonths(statements: ParsedStatement[]): Set<number> {
   const seen = new Map<string, number>();
   const conflicts = new Set<number>();

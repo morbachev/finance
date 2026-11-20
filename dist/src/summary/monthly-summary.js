@@ -4,7 +4,7 @@
 import { getCard } from '../models/types.js';
 import { importErrors } from '../importers/batch-policy.js';
 import { displayMerchant, matchingRule } from '../cloud/merchant-rules.js';
-import { recurringCoveredByOneTime } from '../cloud/assets.js';
+import { recurringCoveredByOneTime, nisaRuleOnDay } from '../cloud/assets.js';
 import { recurringInMonth } from '../cloud/recurring-schedule.js';
 const validPeriod = (value) => /^(19|20|21)\d{2}-(0[1-9]|1[0-2])$/.test(value);
 export function isValidPeriod(value) { return validPeriod(value); }
@@ -40,8 +40,8 @@ export function estimateRegularNet(previous) {
         return null;
     return previous.netPay - nonTaxable;
 }
-function nisaMatch(row, stmt, assets) {
-    const config = assets.nisaCardRule;
+export function isNisaCardRow(row, stmt, assets) {
+    const config = validDay(row.usedOn) ? nisaRuleOnDay(assets, row.usedOn) : null;
     return !!config?.enabled && stmt.cardId === config.cardId &&
         normalized(row.merchant).includes(normalized(config.merchantContains)) &&
         validDay(row.usedOn);
@@ -50,8 +50,9 @@ function categoryFor(row, statement, rules, categories) {
     const categoryId = matchingRule(row.merchant, statement.cardId, rules)?.categoryId;
     return categories.find(c => c.id === categoryId) ?? null;
 }
-function cardTitle(record) {
-    return getCard(record.statement.cardId ?? '')?.name ?? 'カード不明';
+function cardTitle(record, source) {
+    const id = record.statement.cardId ?? '';
+    return source.assets.cardPreferences?.[id]?.name ?? getCard(id)?.name ?? 'カード不明';
 }
 /** Unknown payment dates are listed globally since they cannot be attributed to a month. */
 export function monthlyReport(period, source) {
@@ -100,7 +101,7 @@ export function monthlyReport(period, source) {
             reasons.push('支払日が不明または不正です');
         const reason = [...new Set(reasons)].join(' / ');
         if (reason) {
-            issues.push({ id: record.id, title: cardTitle(record), reason, month });
+            issues.push({ id: record.id, title: cardTitle(record, source), reason, month });
             if (month === period)
                 excludedCount++;
             continue;
@@ -108,7 +109,7 @@ export function monthlyReport(period, source) {
         if (month !== period)
             continue;
         const amt = s.rows.reduce((acc, row) => add(acc, row.amount), 0);
-        const line = { id: record.id, cardId: s.cardId, name: cardTitle(record), billingMonth: s.billingMonth, paymentDate: s.paymentDate, amount: amt, confirmation: s.confirmation };
+        const line = { id: record.id, cardId: s.cardId, name: cardTitle(record, source), billingMonth: s.billingMonth, paymentDate: s.paymentDate, amount: amt, confirmation: s.confirmation };
         if (s.confirmation === 'provisional')
             provisional.push(line);
         included++;
@@ -117,7 +118,7 @@ export function monthlyReport(period, source) {
         if (s.confirmation === 'unknown')
             unknownConfirmationCount++;
         for (const row of s.rows) {
-            if (nisaMatch(row, s, source.assets)) {
+            if (isNisaCardRow(row, s, source.assets)) {
                 nisa = add(nisa, row.amount);
                 continue;
             }
@@ -190,7 +191,8 @@ export function monthlyReport(period, source) {
             continue;
         }
         const line = { id: occurrence.id, entryId: e.id, name: e.name, date: occurrence.date, kind: e.kind,
-            amount: e.amount, fromAccountId: e.fromAccountId, toAccountId: e.toAccountId, categoryId: e.categoryId, payrollOverlap: false };
+            amount: e.amount, fromAccountId: e.fromAccountId, toAccountId: e.toAccountId, categoryId: e.categoryId, payrollOverlap: false,
+            cardOverlap: e.kind === 'expense' && cardRowsForOverlap.some(row => row.name === normalized(e.name).trim() && row.amount === e.amount) };
         recurringLines.push(line);
         if (e.kind === 'income')
             recurringIncome = add(recurringIncome, e.amount);
@@ -205,7 +207,7 @@ export function monthlyReport(period, source) {
             if (!category)
                 unclassifiedCount++;
             // A possible duplicate is a review warning, not grounds to silently discard expenses.
-            if (cardRowsForOverlap.some(row => row.name === normalized(e.name).trim() && row.amount === e.amount))
+            if (line.cardOverlap)
                 recurringCardOverlap++;
         }
         if (e.kind === 'transfer')

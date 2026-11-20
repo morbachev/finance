@@ -1,5 +1,5 @@
 /** Read-only asset forecast: no remote writes, guessed debit accounts, or future salary estimates. */
-import { ASSET_ACCOUNTS, latestBalance, oneTimeAccountDelta, recurringCoveredByOneTime, type AssetAccountId, type AssetsDocument, type BalanceSnapshot, type RecurringEntry } from './assets.js';
+import { ASSET_ACCOUNTS, latestBalance, oneTimeAccountDelta, recurringCoveredByOneTime, nisaRuleOnDay, type AssetAccountId, type AssetsDocument, type BalanceSnapshot, type RecurringEntry } from './assets.js';
 import { recurringOccursOn } from './recurring-schedule.js'; /* finance-monthly-v142 */
 import type { CloudRecord } from './merge.js';
 import { depositedIncomeBetween, type PayrollIncomeEntry } from './payroll-income.js';
@@ -36,17 +36,15 @@ function accountDelta(entry:RecurringEntry,account:AssetAccountId):number {
   return 0;
 }
 export function matchingNisaRows(doc:AssetsDocument,records:CloudRecord[]):Array<{date:string;amount:number;recordId:string;rowId:string}>{
-  const rule=doc.nisaCardRule;
-  if(!rule?.enabled)return [];
-  const term=rule.merchantContains.normalize('NFKC').toLocaleLowerCase();
   const seen=new Set<string>();
   const matches:Array<{date:string;amount:number;recordId:string;rowId:string}>=[];
   for(const record of records){
-    if(record.statement.cardId!==rule.cardId)continue;
     for(const row of record.statement.rows){
       const date=row.usedOn;
-      if(!validDay(date)||!Number.isSafeInteger(row.amount)||row.amount<=0||
-         !row.merchant.normalize('NFKC').toLocaleLowerCase().includes(term))continue;
+      if(!validDay(date)||!Number.isSafeInteger(row.amount)||row.amount<=0)continue;
+      const rule=nisaRuleOnDay(doc,date);
+      if(!rule?.enabled||record.statement.cardId!==rule.cardId||
+         !row.merchant.normalize('NFKC').toLocaleLowerCase().includes(rule.merchantContains.normalize('NFKC').toLocaleLowerCase()))continue;
       const id=`${record.id}:${row.id}`;
       if(seen.has(id))continue;seen.add(id);
       matches.push({date,amount:row.amount,recordId:record.id,rowId:row.id});

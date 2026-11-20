@@ -6,6 +6,7 @@ const html=read('public/index.html');
 const assets=read('src/ui/assets-settings.ts');
 const summary=read('src/ui/monthly-summary.ts');
 const future=read('src/ui/future-projection.ts');
+const bankData=read('src/ui/bank-chart-data.ts');
 const css=read('public/styles/ui-v153.css');
 const main=read('src/main.ts');
 test('three account cards share one details panel, not per-card footnotes',()=>{
@@ -14,18 +15,20 @@ test('three account cards share one details panel, not per-card footnotes',()=>{
   assert.match(css,/assets-account-grid\{align-items:stretch!important\}/);
   assert.doesNotMatch(assets,/label\.append\(make\('small','assets-balance-hint'/);
 });
-test('bank card account form stays in accounts and NISA linkage is in settings',()=>{
-  assert.ok(html.indexOf('id="assets-card-debits"')<html.indexOf('id="settings-nisa-panel"'));
-  assert.ok(html.indexOf('id="assets-card-debits"')<html.indexOf('id="assets-recurring-form"'));
-  assert.match(assets,/async function saveCardDebitAccounts/);
-  assert.match(assets,/await requireVault\(\)\.setCardDebitAccounts\(values\)/);
+test('bank account balances remain in accounts, while card debit mappings belong to card settings',()=>{
+  assert.match(html,/id="assets-account-main"/);
+  assert.doesNotMatch(html,/id="assets-card-debits-form"/);
+  const cardSettings=read('src/ui/card-settings.ts');
+  assert.match(cardSettings,/field\('引落口座',debit\)/);
+  assert.match(cardSettings,/setCardConfiguration\(next,nextDebit\)/);
+  assert.doesNotMatch(assets,/async function saveCardDebitAccounts/);
   assert.doesNotMatch(summary,/monthly-bank-mapping/);
   assert.doesNotMatch(main,/saveCardAccounts:async accounts/);
 });
 test('bank balance chart uses dated step positions and a baseline-aware first point',()=>{
   assert.match(summary,/function bankChart\(/);
-  assert.match(summary,/const firstKnown=timeline\.startDay>=first/);
-  assert.match(summary,/path\.push\(`H\$\{x\(day\)/);
+  assert.match(bankData,/const openDate = timeline\.startDay > first/);
+  assert.match(summary,/path\.push\(`H\$\{x\(point\.day\)/);
   assert.match(summary,/const chart=bankChart\(timeline,period\)/);
   assert.doesNotMatch(summary,/残高は同日の入出金を合算した日末時点の予測です/);
   assert.match(css,/\.monthly-chart\{overflow-x:auto/);

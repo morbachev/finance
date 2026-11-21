@@ -9,8 +9,9 @@ const validDate = (d) => !!d && /^\d{4}-\d{2}-\d{2}$/.test(d) && !Number.isNaN(D
 const close = (a, b) => Math.abs(a - b) <= Math.max(100, Math.round(Math.min(a, b) * 0.08));
 const median = (items) => [...items].sort((a, b) => a - b)[Math.floor(items.length / 2)];
 const todayPeriod = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
-/** Detection accepts only valid, confirmed, uniquely-billed statements. */
-export function detectCardSubscriptions(source, asOf = todayPeriod()) {
+/** A single evidence pipeline for suggestions and registered charge comparisons.
+ * This never edits a saved decision and excludes unsafe/ambiguous source records. */
+function eligibleCardChargeGroups(source, asOf) {
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(asOf))
         throw new Error('検出対象の年月が不正です。');
     const permittedCards = new Set(CARDS.map(item => item.id));
@@ -46,6 +47,23 @@ export function detectCardSubscriptions(source, asOf = todayPeriod()) {
             groups.set(key, group);
         }
     }
+    return groups;
+}
+export function latestRegisteredCardCharges(source, asOf = todayPeriod()) {
+    const result = new Map();
+    for (const [key, group] of eligibleCardChargeGroups(source, asOf)) {
+        const month = group.values.reduce((latest, item) => item.period > latest ? item.period : latest, '');
+        const latest = group.values.filter(item => item.period === month);
+        result.set(key, latest.length === 1 ? { month, amount: latest[0].amount } : null);
+    }
+    return result;
+}
+export function latestRegisteredCardCharge(source, key, asOf = todayPeriod()) {
+    return latestRegisteredCardCharges(source, asOf).get(key) ?? null;
+}
+/** Detection accepts only valid, confirmed, uniquely-billed statements. */
+export function detectCardSubscriptions(source, asOf = todayPeriod()) {
+    const groups = eligibleCardChargeGroups(source, asOf);
     const results = [];
     for (const [key, group] of groups) {
         // Multiple charges on the same card / merchant / payment month are ambiguous.

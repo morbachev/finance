@@ -1,6 +1,6 @@
 import { showActivity } from './activity-feedback.js';
 import { CloudWriteUncertainError } from '../cloud/live-vault.js';
-import { detectCardSubscriptions, subscriptionDecision } from '../subscriptions/detect.js';
+import { detectCardSubscriptions, latestRegisteredCardCharges, subscriptionDecision } from '../subscriptions/detect.js';
 const yen = (amount) => `${amount.toLocaleString('ja-JP')}円`;
 function el(tag, cls = '', text) {
     const node = document.createElement(tag);
@@ -101,11 +101,20 @@ export function initSubscriptions(deps) {
         }
         else {
             const selected = filter === 'registered' ? registered : ignored;
+            const latestCharges = filter === 'registered' ? latestRegisteredCardCharges(source) : null;
             for (const [key, item] of selected) {
                 const control = button('候補に戻す', () => { void update(key, null); });
                 control.disabled = busy;
                 const cardName = source.assets.cardPreferences?.[item.cardId]?.name ?? item.cardId;
-                list.append(card(item.label, `${cardName} · ${item.frequency === 'monthly' ? '毎月' : '毎年'}`, yen(item.amount), filter === 'registered' ? 'カード払い' : '候補から除外しています', [control]));
+                const latest = latestCharges?.get(key) ?? null;
+                const difference = latest ? latest.amount - item.amount : 0;
+                const evidence = filter === 'registered'
+                    ? `登録時の推定額：${yen(item.amount)} · 最新の確認済み明細：${latest ? `${yen(latest.amount)}（${latest.month.replace('-', '年')}月支払）${difference ? ` · 登録時との差額 ${difference > 0 ? '+' : '−'}${yen(Math.abs(difference))}` : ' · 変化なし'}` : '確認できません'}`
+                    : '候補から除外しています';
+                const entry = card(item.label, `${cardName} · ${item.frequency === 'monthly' ? '毎月' : '毎年'}`, yen(item.amount), evidence, [control]);
+                if (filter === 'registered' && difference)
+                    entry.classList.add('subscriptions-price-changed');
+                list.append(entry);
             }
             if (!selected.length)
                 list.append(el('p', 'subscriptions-empty', '登録はありません。'));

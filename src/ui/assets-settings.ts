@@ -56,9 +56,13 @@ function frequencyLabel(e:RecurringEntry):string {
   return e.frequency==='monthly'?`毎月${day}`:`毎年${e.monthOfYear}月${day}`;
 }
 
-/** Editing the same row is safe; switching another row must protect an unsaved draft. */
-export function recurringSwitchNeedsConfirmation(dirty:boolean,editingId:string|null,nextId:string):boolean {
-  return editingId!==nextId&&(dirty||editingId!==null);
+/** Snapshot the actual form values, not whether a field received an input event. */
+export function recurringDraftSnapshot(fields:ReadonlyArray<{id:string;type:string;value:string;checked?:boolean}>):string {
+  return JSON.stringify(fields.map(field=>[field.id,(field.type==='checkbox'||field.type==='radio')?!!field.checked:field.value]));
+}
+/** Switching to a different item needs confirmation only when a draft really changed. */
+export function recurringSwitchNeedsConfirmation(changed:boolean,editingId:string|null,nextId:string):boolean {
+  return editingId!==nextId&&changed;
 }
 
 export interface AssetsUi {
@@ -76,7 +80,8 @@ export function payrollPassphraseUpdate(entered:string,saved:string|null):string
   return entered&&entered!==saved?entered:undefined;
 }
 export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=>CategoryDefinition[],onSaved:(message:string)=>void,onPayrollChange:()=>void=()=>{}):AssetsUi {
-  let busy=false,dirty=false,nisaDirty=false,birthDirty=false,editingId:string|null=null;
+  let busy=false,nisaDirty=false,birthDirty=false,editingId:string|null=null;
+  let recurringBaseline='';
   let payrollSession:PayrollReadSession|null=null;
   let payrollIncome:PayrollIncomeEntry[]=[];
   let payrollSynced=false,payrollBusy=false,payrollAccountDirty=false;
@@ -87,8 +92,8 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
   const histories=new Map<AssetAccountId,HTMLElement>();
   const accountDetails=new Map<AssetAccountId,HTMLElement>();
   let mizuhoPlanDirty=false;
-  let onceEditingId:string|null=null,onceDirty=false,onceShowAll=false;
-  const editing=()=>!!editingId;
+  let onceEditingId:string|null=null,onceShowAll=false;
+  let onceBaseline='';
   const value=(id:string)=>$<HTMLInputElement|HTMLSelectElement>(id).value;
   const choices=(select:HTMLSelectElement,options:Array<{value:string;label:string}>)=>{
     select.replaceChildren(...options.map(o=>new Option(o.label,o.value)));
@@ -103,7 +108,12 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
       if(linkButton)linkButton.disabled=!getVault()?.unlocked||!getVault()?.assetSettings().nisaCardRule;
     }
   }
-  function markDirty():void {dirty=true;}
+  function recurringSnapshot():string {
+    const fields=$<HTMLFormElement>('assets-recurring-form')
+      .querySelectorAll<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>('input,select,textarea');
+    return recurringDraftSnapshot(Array.from(fields));
+  }
+  const recurringHasChanges=():boolean=>recurringSnapshot()!==recurringBaseline;
   function resetForm():void {
     editingId=null;
     $<HTMLFormElement>('assets-recurring-form').reset();
@@ -121,7 +131,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     $('assets-recurring-form-title').textContent='定期入出金を追加';
     $('assets-recurring-save').textContent='保存';
     updateFormFields();
-    dirty=false;
+    recurringBaseline=recurringSnapshot();
   }
   function updateFormFields():void {
     const frequency=value('assets-recurring-frequency') as RecurringFrequency;
@@ -155,12 +165,12 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     if(busy)return false;
     // Re-selecting the current entry must not overwrite its in-progress draft.
     if(editingId===item.id){$('assets-recurring-form').scrollIntoView({behavior:'smooth',block:'start'});return true;}
-    if(recurringSwitchNeedsConfirmation(dirty,editingId,item.id)&&!window.confirm('編集中の入力を破棄して、指定した定期入出金を開きますか？'))return false;
+    if(recurringSwitchNeedsConfirmation(recurringHasChanges(),editingId,item.id)&&!window.confirm('編集中の入力を破棄して、指定した定期入出金を開きますか？'))return false;
     populateForm(item);
     return true;
   }
   function populateForm(item:RecurringEntry):void {
-    editingId=item.id;dirty=true;
+    editingId=item.id;
     $<HTMLInputElement>('assets-recurring-name').value=item.name;
     $<HTMLInputElement>('assets-recurring-amount').value=String(item.amount);
     $<HTMLSelectElement>('assets-recurring-kind').value=item.kind;
@@ -177,6 +187,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     $('assets-recurring-form-title').textContent=`「${item.name}」を編集`;
     $('assets-recurring-save').textContent='保存';
     updateFormFields();
+    recurringBaseline=recurringSnapshot();
     $('assets-recurring-form').scrollIntoView({behavior:'smooth',block:'start'});
   }
   async function saveSnapshots():Promise<void> {
@@ -255,8 +266,14 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     $('assets-once-funding-wrap').classList.toggle('hidden',!funding);
     if(!funding)$<HTMLInputElement>('assets-once-funding').checked=false;
   }
+  function onceSnapshot():string {
+    const fields=$<HTMLFormElement>('assets-once-form')
+      .querySelectorAll<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>('input,select,textarea');
+    return recurringDraftSnapshot(Array.from(fields));
+  }
+  const onceHasChanges=():boolean=>onceSnapshot()!==onceBaseline;
   function resetOnceForm():void {
-    onceEditingId=null;onceDirty=false;
+    onceEditingId=null;
     $<HTMLFormElement>('assets-once-form').reset();
     $<HTMLInputElement>('assets-once-date').value=localDate();
     $<HTMLSelectElement>('assets-once-from').value='rakuten-bank';
@@ -266,6 +283,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     $('assets-once-save').textContent='保存';
     status($('assets-once-error'),'');
     onceFormFields();
+    onceBaseline=onceSnapshot();
   }
   function openOnce(entry?:OneTimeEntry):void {
     if(busy||!getVault()?.unlocked)return;
@@ -282,12 +300,17 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
       $<HTMLFormElement>('assets-once-form').querySelector<HTMLInputElement>(`input[name="assets-once-status"][value="${entry.status}"]`)!.checked=true;
       $('assets-once-dialog-title').textContent='入出金を編集';
       $('assets-once-save').textContent='保存';
-      onceFormFields();onceDirty=false;
+      onceFormFields();
     }
+    onceBaseline=onceSnapshot();
     onceDialog.showModal();
     lockOncePage();
   }
-  function closeOnce():void {if(busy)return;onceDialog.close();resetOnceForm();}
+  function closeOnce():void {
+    if(busy)return;
+    if(onceHasChanges()&&!window.confirm('編集中の入力を破棄して閉じますか？'))return;
+    onceDialog.close();resetOnceForm();
+  }
   function readOnce():OneTimeEntry {
     const kind=onceKind(),from=value('assets-once-from') as AssetAccountId,to=value('assets-once-to') as AssetAccountId;
     return validateOneTime({id:onceEditingId??crypto.randomUUID(),date:value('assets-once-date'),
@@ -322,7 +345,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     try {
       const entry=readOnce();toggleBusy(true);
       await requireVault().upsertOneTime(entry);
-      onceDirty=false;onceDialog.close();resetOnceForm();
+      onceDialog.close();resetOnceForm();
       status($('assets-once-status'),'入出金を保存しました。');onSaved('入出金をOneDriveに保存しました。');
       render();onPayrollChange();
     }catch(error){status(node,mutationError(error),true);}
@@ -644,8 +667,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
   $('assets-once-close').addEventListener('click',closeOnce);
   $('assets-once-cancel').addEventListener('click',closeOnce);
   onceDialog.addEventListener('cancel',event=>{event.preventDefault();closeOnce();});
-  $<HTMLFormElement>('assets-once-form').addEventListener('input',()=>{onceDirty=true;});
-  $<HTMLFormElement>('assets-once-form').addEventListener('change',()=>{onceDirty=true;onceFormFields();});
+  $<HTMLFormElement>('assets-once-form').addEventListener('change',onceFormFields);
   $<HTMLFormElement>('assets-once-form').addEventListener('submit',event=>{event.preventDefault();void saveOnce();});
   $<HTMLFormElement>('assets-balances-form').addEventListener('submit',event=>{event.preventDefault();void saveSnapshots();});
   choices($<HTMLSelectElement>('assets-nisa-card'),CARDS.map(c=>({value:c.id,label:c.name})));
@@ -668,11 +690,9 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
   choices($<HTMLSelectElement>('assets-recurring-day'),[{value:'0',label:'末日'},...Array.from({length:31},(_,i)=>({value:String(i+1),label:`${i+1}日`}))]);
   choices($<HTMLSelectElement>('assets-recurring-month'),Array.from({length:12},(_,i)=>({value:String(i+1),label:`${i+1}月`})));
   choices($<HTMLSelectElement>('assets-recurring-weekday'),weekdayLabels.map((label,i)=>({value:String(i),label:`${label}曜日`})));
-  $('assets-recurring-form').addEventListener('input',markDirty);
-  $('assets-recurring-form').addEventListener('change',markDirty);
   $<HTMLSelectElement>('assets-recurring-kind').addEventListener('change',updateFormFields);
   $<HTMLSelectElement>('assets-recurring-frequency').addEventListener('change',updateFormFields);
-  $('assets-recurring-clear').addEventListener('click',()=>{if((dirty||editingId!==null)&&!window.confirm('編集中の入力を破棄してクリアしますか？'))return;resetForm();status($('assets-recurring-status'),'入力をクリアしました。');});
+  $('assets-recurring-clear').addEventListener('click',()=>{if(recurringHasChanges()&&!window.confirm('編集中の入力を破棄してクリアしますか？'))return;resetForm();status($('assets-recurring-status'),'入力をクリアしました。');});
   $<HTMLFormElement>('assets-recurring-form').addEventListener('submit',event=>{
     event.preventDefault();if(busy)return;
     void (async()=>{
@@ -720,6 +740,5 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     status($('assets-birth-status'),'');
     status($('assets-balances-status'),'');
     status($('assets-recurring-status'),'');status($('assets-once-status'),'');render();onPayrollChange();
-  },isBusy:()=>busy||payrollBusy,isDirty:()=>onceDirty||dirty||nisaDirty||birthDirty||payrollAccountDirty||mizuhoPlanDirty||editing()||[...amounts.values()].some(input=>input.value.trim()!=='')||
-    value('assets-recurring-name').trim()!==''||value('assets-recurring-amount').trim()!==''};
+  },isBusy:()=>busy||payrollBusy,isDirty:()=>onceHasChanges()||recurringHasChanges()||nisaDirty||birthDirty||payrollAccountDirty||mizuhoPlanDirty||[...amounts.values()].some(input=>input.value.trim()!=='')};
 }

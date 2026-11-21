@@ -18,8 +18,9 @@ const median=(items:number[])=>[...items].sort((a,b)=>a-b)[Math.floor(items.leng
 const todayPeriod=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;};
 interface Observation {period:string; amount:number}
 interface Group {cardId:string;merchant:string;values:Observation[]}
-/** Detection accepts only valid, confirmed, uniquely-billed statements. */
-export function detectCardSubscriptions(source:MonthlySource,asOf=todayPeriod()):SubscriptionCandidate[]{
+/** A single evidence pipeline for suggestions and registered charge comparisons.
+ * This never edits a saved decision and excludes unsafe/ambiguous source records. */
+function eligibleCardChargeGroups(source:MonthlySource,asOf:string):Map<string,Group> {
   if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(asOf))throw new Error('検出対象の年月が不正です。');
   const permittedCards=new Set(CARDS.map(item=>item.id));
   const duplicate=new Map<string,number>();
@@ -47,6 +48,29 @@ export function detectCardSubscriptions(source:MonthlySource,asOf=todayPeriod())
       group.values.push({period,amount:row.amount});groups.set(key,group);
     }
   }
+  return groups;
+}
+
+/** Most recent *confirmed, uniquely identified* card charge for a registered merchant.
+ * A new price needs no repeated pattern; a single new confirmed bill is sufficient.
+ * When the latest month contains multiple matching charges, no price is guessed. */
+export type LatestRegisteredCharge={month:string;amount:number};
+export function latestRegisteredCardCharges(source:MonthlySource,asOf=todayPeriod()):Map<string,LatestRegisteredCharge|null> {
+  const result=new Map<string,LatestRegisteredCharge|null>();
+  for(const [key,group] of eligibleCardChargeGroups(source,asOf)){
+    const month=group.values.reduce((latest,item)=>item.period>latest?item.period:latest,'');
+    const latest=group.values.filter(item=>item.period===month);
+    result.set(key,latest.length===1?{month,amount:latest[0]!.amount}:null);
+  }
+  return result;
+}
+export function latestRegisteredCardCharge(source:MonthlySource,key:string,asOf=todayPeriod()):LatestRegisteredCharge|null {
+  return latestRegisteredCardCharges(source,asOf).get(key)??null;
+}
+
+/** Detection accepts only valid, confirmed, uniquely-billed statements. */
+export function detectCardSubscriptions(source:MonthlySource,asOf=todayPeriod()):SubscriptionCandidate[]{
+  const groups=eligibleCardChargeGroups(source,asOf);
   const results:SubscriptionCandidate[]=[];
   for(const [key,group] of groups){
     // Multiple charges on the same card / merchant / payment month are ambiguous.

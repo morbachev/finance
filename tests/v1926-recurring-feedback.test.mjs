@@ -8,12 +8,12 @@ test('a different recurring edit cannot discard the unsaved form without confirm
   assert.equal(recurringSwitchNeedsConfirmation(false,null,'b'),false);
   assert.equal(recurringSwitchNeedsConfirmation(true,null,'b'),true);
   assert.equal(recurringSwitchNeedsConfirmation(true,'a','b'),true);
-  assert.equal(recurringSwitchNeedsConfirmation(false,'a','b'),true);
+  assert.equal(recurringSwitchNeedsConfirmation(false,'a','b'),false);
   assert.equal(recurringSwitchNeedsConfirmation(true,'a','a'),false);
   const source=read('src/ui/assets-settings.ts');
   assert.match(source,/actions\.append\(addButton\('編集',\(\)=>\{openRecurringEditor\(item\);\}\)/);
   assert.match(source,/return openRecurringEditor\(match\)/);
-  assert.match(source,/if\(recurringSwitchNeedsConfirmation\(dirty,editingId,item\.id\)&&!window\.confirm/);
+  assert.match(source,/if\(recurringSwitchNeedsConfirmation\(recurringHasChanges\(\),editingId,item\.id\)&&!window\.confirm/);
   assert.match(source,/if\(editingId===item\.id\)\{[\s\S]*?return true;/);
   assert.match(source,/\('assets-recurring-clear'\).*window\.confirm\('編集中の入力を破棄してクリアしますか？'\)/);
 });

@@ -64,16 +64,21 @@ function frequencyLabel(e) {
     const day = e.dayOfMonth === 0 ? '末日' : `${e.dayOfMonth}日`;
     return e.frequency === 'monthly' ? `毎月${day}` : `毎年${e.monthOfYear}月${day}`;
 }
-/** Editing the same row is safe; switching another row must protect an unsaved draft. */
-export function recurringSwitchNeedsConfirmation(dirty, editingId, nextId) {
-    return editingId !== nextId && (dirty || editingId !== null);
+/** Snapshot the actual form values, not whether a field received an input event. */
+export function recurringDraftSnapshot(fields) {
+    return JSON.stringify(fields.map(field => [field.id, (field.type === 'checkbox' || field.type === 'radio') ? !!field.checked : field.value]));
+}
+/** Switching to a different item needs confirmation only when a draft really changed. */
+export function recurringSwitchNeedsConfirmation(changed, editingId, nextId) {
+    return editingId !== nextId && changed;
 }
 /** Credential updates persist for automatic refresh; empty input preserves saved credentials. */
 export function payrollPassphraseUpdate(entered, saved) {
     return entered && entered !== saved ? entered : undefined;
 }
 export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollChange = () => { }) {
-    let busy = false, dirty = false, nisaDirty = false, birthDirty = false, editingId = null;
+    let busy = false, nisaDirty = false, birthDirty = false, editingId = null;
+    let recurringBaseline = '';
     let payrollSession = null;
     let payrollIncome = [];
     let payrollSynced = false, payrollBusy = false, payrollAccountDirty = false;
@@ -84,8 +89,8 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
     const histories = new Map();
     const accountDetails = new Map();
     let mizuhoPlanDirty = false;
-    let onceEditingId = null, onceDirty = false, onceShowAll = false;
-    const editing = () => !!editingId;
+    let onceEditingId = null, onceShowAll = false;
+    let onceBaseline = '';
     const value = (id) => $(id).value;
     const choices = (select, options) => {
         select.replaceChildren(...options.map(o => new Option(o.label, o.value)));
@@ -107,7 +112,12 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
                 linkButton.disabled = !getVault()?.unlocked || !getVault()?.assetSettings().nisaCardRule;
         }
     }
-    function markDirty() { dirty = true; }
+    function recurringSnapshot() {
+        const fields = $('assets-recurring-form')
+            .querySelectorAll('input,select,textarea');
+        return recurringDraftSnapshot(Array.from(fields));
+    }
+    const recurringHasChanges = () => recurringSnapshot() !== recurringBaseline;
     function resetForm() {
         editingId = null;
         $('assets-recurring-form').reset();
@@ -125,7 +135,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
         $('assets-recurring-form-title').textContent = '定期入出金を追加';
         $('assets-recurring-save').textContent = '保存';
         updateFormFields();
-        dirty = false;
+        recurringBaseline = recurringSnapshot();
     }
     function updateFormFields() {
         const frequency = value('assets-recurring-frequency');
@@ -163,14 +173,13 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             $('assets-recurring-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
             return true;
         }
-        if (recurringSwitchNeedsConfirmation(dirty, editingId, item.id) && !window.confirm('編集中の入力を破棄して、指定した定期入出金を開きますか？'))
+        if (recurringSwitchNeedsConfirmation(recurringHasChanges(), editingId, item.id) && !window.confirm('編集中の入力を破棄して、指定した定期入出金を開きますか？'))
             return false;
         populateForm(item);
         return true;
     }
     function populateForm(item) {
         editingId = item.id;
-        dirty = true;
         $('assets-recurring-name').value = item.name;
         $('assets-recurring-amount').value = String(item.amount);
         $('assets-recurring-kind').value = item.kind;
@@ -187,6 +196,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
         $('assets-recurring-form-title').textContent = `「${item.name}」を編集`;
         $('assets-recurring-save').textContent = '保存';
         updateFormFields();
+        recurringBaseline = recurringSnapshot();
         $('assets-recurring-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
     async function saveSnapshots() {
@@ -294,9 +304,14 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
         if (!funding)
             $('assets-once-funding').checked = false;
     }
+    function onceSnapshot() {
+        const fields = $('assets-once-form')
+            .querySelectorAll('input,select,textarea');
+        return recurringDraftSnapshot(Array.from(fields));
+    }
+    const onceHasChanges = () => onceSnapshot() !== onceBaseline;
     function resetOnceForm() {
         onceEditingId = null;
-        onceDirty = false;
         $('assets-once-form').reset();
         $('assets-once-date').value = localDate();
         $('assets-once-from').value = 'rakuten-bank';
@@ -306,6 +321,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
         $('assets-once-save').textContent = '保存';
         status($('assets-once-error'), '');
         onceFormFields();
+        onceBaseline = onceSnapshot();
     }
     function openOnce(entry) {
         if (busy || !getVault()?.unlocked)
@@ -324,13 +340,19 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             $('assets-once-dialog-title').textContent = '入出金を編集';
             $('assets-once-save').textContent = '保存';
             onceFormFields();
-            onceDirty = false;
         }
+        onceBaseline = onceSnapshot();
         onceDialog.showModal();
         lockOncePage();
     }
-    function closeOnce() { if (busy)
-        return; onceDialog.close(); resetOnceForm(); }
+    function closeOnce() {
+        if (busy)
+            return;
+        if (onceHasChanges() && !window.confirm('編集中の入力を破棄して閉じますか？'))
+            return;
+        onceDialog.close();
+        resetOnceForm();
+    }
     function readOnce() {
         const kind = onceKind(), from = value('assets-once-from'), to = value('assets-once-to');
         return validateOneTime({ id: onceEditingId ?? crypto.randomUUID(), date: value('assets-once-date'),
@@ -371,7 +393,6 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             const entry = readOnce();
             toggleBusy(true);
             await requireVault().upsertOneTime(entry);
-            onceDirty = false;
             onceDialog.close();
             resetOnceForm();
             status($('assets-once-status'), '入出金を保存しました。');
@@ -876,8 +897,7 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
     $('assets-once-close').addEventListener('click', closeOnce);
     $('assets-once-cancel').addEventListener('click', closeOnce);
     onceDialog.addEventListener('cancel', event => { event.preventDefault(); closeOnce(); });
-    $('assets-once-form').addEventListener('input', () => { onceDirty = true; });
-    $('assets-once-form').addEventListener('change', () => { onceDirty = true; onceFormFields(); });
+    $('assets-once-form').addEventListener('change', onceFormFields);
     $('assets-once-form').addEventListener('submit', event => { event.preventDefault(); void saveOnce(); });
     $('assets-balances-form').addEventListener('submit', event => { event.preventDefault(); void saveSnapshots(); });
     choices($('assets-nisa-card'), CARDS.map(c => ({ value: c.id, label: c.name })));
@@ -900,11 +920,9 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
     choices($('assets-recurring-day'), [{ value: '0', label: '末日' }, ...Array.from({ length: 31 }, (_, i) => ({ value: String(i + 1), label: `${i + 1}日` }))]);
     choices($('assets-recurring-month'), Array.from({ length: 12 }, (_, i) => ({ value: String(i + 1), label: `${i + 1}月` })));
     choices($('assets-recurring-weekday'), weekdayLabels.map((label, i) => ({ value: String(i), label: `${label}曜日` })));
-    $('assets-recurring-form').addEventListener('input', markDirty);
-    $('assets-recurring-form').addEventListener('change', markDirty);
     $('assets-recurring-kind').addEventListener('change', updateFormFields);
     $('assets-recurring-frequency').addEventListener('change', updateFormFields);
-    $('assets-recurring-clear').addEventListener('click', () => { if ((dirty || editingId !== null) && !window.confirm('編集中の入力を破棄してクリアしますか？'))
+    $('assets-recurring-clear').addEventListener('click', () => { if (recurringHasChanges() && !window.confirm('編集中の入力を破棄してクリアしますか？'))
         return; resetForm(); status($('assets-recurring-status'), '入力をクリアしました。'); });
     $('assets-recurring-form').addEventListener('submit', event => {
         event.preventDefault();
@@ -984,6 +1002,5 @@ export function initAssetsSettings(getVault, getCategories, onSaved, onPayrollCh
             status($('assets-once-status'), '');
             render();
             onPayrollChange();
-        }, isBusy: () => busy || payrollBusy, isDirty: () => onceDirty || dirty || nisaDirty || birthDirty || payrollAccountDirty || mizuhoPlanDirty || editing() || [...amounts.values()].some(input => input.value.trim() !== '') ||
-            value('assets-recurring-name').trim() !== '' || value('assets-recurring-amount').trim() !== '' };
+        }, isBusy: () => busy || payrollBusy, isDirty: () => onceHasChanges() || recurringHasChanges() || nisaDirty || birthDirty || payrollAccountDirty || mizuhoPlanDirty || [...amounts.values()].some(input => input.value.trim() !== '') };
 }

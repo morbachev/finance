@@ -23,3 +23,7 @@
 /* Failed/uncertain card subscription writes must remain readable in dark mode. */
 .subscriptions-notice.error{padding:11px 13px;border:1px solid #d9979f;border-radius:var(--radius-control);background:#fff0f1;color:#93383f;font-size:12px;line-height:1.65;overflow-wrap:anywhere}
 [data-theme="dark"] .subscriptions-notice.error{background:#37262f;border-color:#81515f;color:#ffbec4}
+
+/* Explicit, read-only indication that a registered estimate differs from the latest confirmed charge. */
+.subscriptions-price-changed .subscriptions-evidence{font-weight:600;color:var(--text,#263341)}
+[data-theme="dark"] .subscriptions-price-changed .subscriptions-evidence{color:inherit}

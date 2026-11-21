@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -33,7 +34,7 @@ test('active UI uses shared arrows, settings inputs and one atomic save; outdate
  const html=read('public/index.html'),settings=read('public/styles/settings-v194.css');
  const shared=read('public/styles/ui-v152.css'),sidebar=read('public/styles/ui-v153.css');
  const card=read('src/ui/card-settings.ts'),reports=read('src/ui/monthly-reports.ts');
- assert.match(html,/styles\/settings-v194\.css/);
+ assert.match(styleOrder,/styles\/settings-v194\.css/);
  assert.doesNotMatch(html,/styles\/(?:settings-v193|ui-v194|card-settings-v171|card-settings-v192)\.css/);
  assert.match(shared,/details > summary::after/);
  assert.doesNotMatch(settings,/summary::after\{/);

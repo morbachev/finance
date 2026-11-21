@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -65,5 +66,5 @@ test('both one-off transaction radio groups have bordered checked-state options 
   assert.match(css,/@media \(max-width: 630px\)/);
   assert.match(html,/name="assets-once-kind"/);
   assert.match(html,/name="assets-once-status"/);
-  assert.match(html,/styles\/ui-v164\.css[\s\S]*?styles\/ui-v165\.css/);
+  assert.match(styleOrder,/styles\/ui-v164\.css[\s\S]*?styles\/ui-v165\.css/);
 });

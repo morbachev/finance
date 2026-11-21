@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -6,7 +7,7 @@ const html = readFileSync(new URL('../public/index.html',import.meta.url),'utf8'
 const css = readFileSync(new URL('../public/styles/ui-v163.css',import.meta.url),'utf8');
 
 test('v1.6.3 loads a dedicated desktop-only stylesheet after earlier styles', () => {
-  assert.match(html, /styles\/ui-v162\.css[\s\S]*?styles\/ui-v163\.css/);
+  assert.match(styleOrder, /styles\/ui-v162\.css[\s\S]*?styles\/ui-v163\.css/);
   assert.match(css, /@media \(min-width: 981px\)/);
   assert.doesNotMatch(css, /@media\s*\(max-width:\s*(?:700|800)px\)/);
 });

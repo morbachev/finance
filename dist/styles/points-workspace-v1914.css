@@ -71,3 +71,14 @@
  #import-view.has-import-drafts .detail-summary-block{padding:13px}
  #import-view.has-import-drafts .batch-bar{flex-wrap:wrap}
 }
+
+/* A native date picker needs room for its calendar icon. The ledger scrolls. */
+#manage-view .manage-editor .transaction-table{min-width:720px}
+#manage-view .manage-editor .transaction-table .col-date{width:162px}
+#manage-view .manage-editor .transaction-table td[data-label="利用日"] input[type="date"]{
+  width:146px;min-width:0;max-width:100%;box-sizing:border-box;
+  color:var(--ink);color-scheme:light;
+}
+:root[data-theme="dark"] #manage-view .manage-editor .transaction-table td[data-label="利用日"] input[type="date"]{
+  color-scheme:dark;
+}

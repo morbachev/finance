@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
@@ -38,7 +39,7 @@ test('all major sections and connection status share one outer gutter',()=>{
   assert.match(css,/workspace > \.content/);
   assert.match(css,/#cloud-live-bar,#operation-result/);
   for(const id of ['#home-view','#summary-view','#manage-view','#settings-view'])assert.ok(css.includes(id));
-  assert.match(readFileSync('public/index.html','utf8'),/styles\/layout-v172.css/);
+  assert.match(styleOrder,/styles\/layout-v172.css/);
 });
 test('GitHub Pages deploy depends on full-history Gitleaks and custom scan',()=>{
   const yml=readFileSync('.github/workflows/pages.yml','utf8');

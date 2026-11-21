@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -32,7 +33,7 @@ test('new vault creation is a separate guarded explicit action',()=>{
 });
 
 test('desktop manager fills full available horizontal width while mobile remains untouched',()=>{
-  assert.match(html,/styles\/ui-v167\.css/);
+  assert.match(styleOrder,/styles\/ui-v167\.css/);
   assert.match(css,/@media \(min-width: 981px\)/);
   assert.match(css,/\.workspace > \.content:has\(#manage-view:not\(\.hidden\)\)/);
   assert.match(css,/#manage-view\.manage-view\s*\{[^}]*max-width:\s*none/s);

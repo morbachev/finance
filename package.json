@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
-    "build": "node scripts/clean-dist.mjs && tsc && node scripts/copy-static.mjs && node scripts/build-msal.mjs",
+    "build:styles": "node scripts/build-styles.mjs",
+    "build": "npm run build:styles && node scripts/clean-dist.mjs && tsc && node scripts/copy-static.mjs && node scripts/build-msal.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "verify:cloud": "node scripts/check-cloud-asset.mjs",
     "audit:staged": "node scripts/audit-publication.mjs --staged",

@@ -45,7 +45,7 @@ test('import summary, list, management and batch bar distinguish choices from re
   assert.match(main,/const state = displayIssues\(statement\)\.length \? 'review' : cardSelectionPending\(statement\) \? 'selection'/);
   assert.match(main,/const selectionOnly = blocked\.filter/);
   assert.match(main, /selectionOnly\.length \? `\$\{selectionOnly\.length\}件のカード選択待ち`/);
-  assert.match(main, /\$\('manage-validation'\)\.textContent = errorMessages\.length \?/);
+  assert.match(main, /\$\('manage-validation'\)\.textContent=errors\.length\?/);
   assert.doesNotMatch(main,/別カードの明細に合算しないための確認です/);
   assert.match(css,/\.statement-flag\.selection/);
 });

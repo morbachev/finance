@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -77,6 +78,6 @@ test('chart DOM supports tap, accessible date buttons, arrow keys, and a complet
  assert.match(ui,/aria-pressed/);assert.match(ui,/bankChartData\(timeline,period\)/);
  assert.match(ui,/point\.items\.length/);assert.match(ui,/monthly-bank-all/);
  assert.match(css,/min-height:44px/);
- assert.match(html,/bank-chart-v184\.css/);
+ assert.match(styleOrder,/bank-chart-v184\.css/);
  assert.doesNotMatch(ui,/localStorage\.setItem|sessionStorage\.setItem/);
 });

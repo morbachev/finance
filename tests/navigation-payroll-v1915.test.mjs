@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -15,7 +16,7 @@ test('明細インポートと明細管理は独立したトップレベルメ�
 });
 
 test('通常の折りたたみは幅をアニメーションさせ、ホバー時の画面遷移は閉じる演出を使う',()=>{
-  assert.match(html,/styles\/navigation-payroll-v1915\.css/);
+  assert.match(styleOrder,/styles\/navigation-payroll-v1915\.css/);
   assert.match(css,/transition:width 260ms/);
   assert.match(css,/#finance-sidebar #sidebar-collapse-toggle\{transition:none!important\}/);
   assert.match(css,/prefers-reduced-motion:reduce/);

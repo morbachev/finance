@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -16,6 +17,6 @@ test('mobile statement rows receive compact, scoped spacing without desktop impa
 });
 
 test('mobile compact CSS is included after previous layout rules',()=>{
-  assert.match(html,/ui-v160\.css[\s\S]*ui-v161\.css/);
-  assert.equal((html.match(/ui-v161\.css/g)??[]).length,1);
+  assert.match(styleOrder,/ui-v160\.css[\s\S]*ui-v161\.css/);
+  assert.equal((styleOrder.match(/ui-v161\.css/g)??[]).length,1);
 });

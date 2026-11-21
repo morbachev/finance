@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -7,7 +8,7 @@ const main=readFileSync('src/main.ts','utf8');
 const css=readFileSync('public/styles/layout-v1911.css','utf8');
 
 test('new UI refinements load after the existing layout styles',()=>{
-  assert.ok(html.indexOf('layout-v1910.css') < html.indexOf('layout-v1911.css'));
+  assert.ok(styleOrder.indexOf('layout-v1910.css') < styleOrder.indexOf('layout-v1911.css'));
   assert.match(css,/#import-view \.transactions-panel-inner\s*\{border-top:0\}/);
 });
 

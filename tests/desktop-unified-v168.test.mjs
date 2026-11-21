@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -6,7 +7,7 @@ const html = readFileSync(new URL('../public/index.html', import.meta.url),'utf8
 const css = readFileSync(new URL('../public/styles/ui-v168.css', import.meta.url),'utf8');
 
 test('v1.6.8 shares the same desktop content gutters between import and management',()=>{
-  assert.match(html,/styles\/ui-v167\.css[\s\S]*?styles\/ui-v168\.css/);
+  assert.match(styleOrder,/styles\/ui-v167\.css[\s\S]*?styles\/ui-v168\.css/);
   assert.match(css,/\.content:has\(#import-view:not\(\.hidden\)\)/);
   assert.match(css,/\.content:has\(#manage-view:not\(\.hidden\)\)/);
   assert.match(css,/padding-left: clamp\(18px, 2vw, 32px\)/);

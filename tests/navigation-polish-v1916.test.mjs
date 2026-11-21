@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -9,7 +10,7 @@ const main=src('src/main.ts');
 test('初期描画前に保存済み開閉設定を復元し、初期値は折りたたみ',()=>{
   const boot=src('public/scripts/nav-boot.js');
   assert.match(html,/<html lang="ja" class="finance-nav-boot-collapsed">/);
-  assert.ok(html.indexOf('scripts/nav-boot.js')<html.indexOf('styles/navigation-polish-v1916.css'));
+  assert.ok(html.indexOf('scripts/nav-boot.js')<html.indexOf('styles/app.css') && styleOrder.includes('navigation-polish-v1916.css'));
   assert.match(boot,/localStorage\.getItem\('finance-sidebar-collapsed'\) === '0'/);
   assert.match(main,/getItem\('finance-sidebar-collapsed'\)!=='0'/);
   assert.match(main,/setDesktopMenuCollapsed\(sidebarCollapsed\);\s*document\.documentElement\.classList\.remove\('finance-nav-boot-collapsed'\)/);

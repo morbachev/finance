@@ -144,6 +144,12 @@ function markDirty(s: ParsedStatement): void {
   dirty.add(s);
   render();
 }
+/** Do not replace the editor DOM on input blur: the following click must reach its button. */
+function markManagerInlineDirty(s: ParsedStatement): void {
+  dirty.add(s);
+  if ($('manage-view').classList.contains('hidden') || active() !== s) return;
+  updateManagerEditState(s);
+}
 function dateDisplay(value: string | null | undefined): string { return value ? value.replace(/-/g, '/') : '未取得'; }
 function validDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -408,14 +414,20 @@ function renderSummary(): void {
   for (const w of fixedWarnings) notices.append(notice(w, validationIssues.length ? 'bad' : 'warn'));
 }
 
-function makeInput(value: string, className: string, update: (value: string) => void, ariaLabel: string): HTMLInputElement {
-  const input = document.createElement('input'); input.type = 'text'; input.value = value;
+function makeInput(value: string, className: string, update: (value: string, input: HTMLInputElement) => void, ariaLabel: string): HTMLInputElement {
+  const input = document.createElement('input');
+  // Use the OS date picker for dates, and the phone's number keypad for money.
+  // Amounts stay text to preserve signed refunds and comma-separated values.
+  input.type = ariaLabel === '利用日' ? 'date' : 'text';
+  input.value = input.type === 'date' ? value.replace(/\//g, '-') : value;
+  if (ariaLabel === '金額') input.inputMode = 'numeric';
   input.className = className; input.setAttribute('aria-label', ariaLabel);
-  input.addEventListener('change', () => update(input.value));
+  input.addEventListener('change', () => update(input.value, input));
   return input;
 }
 
-function renderSortControls(): void {
+/** Bind permanent cloud actions once; rendering must never add event handlers. */
+function initCloudActionControls(): void {
   const connectionDialog=$<HTMLDialogElement>('cloud-connect-dialog');
   $('cloud-connect-later').addEventListener('click',()=>{
     cloudConnectDismissed=true;
@@ -464,6 +476,9 @@ function renderSortControls(): void {
       operationResult(error instanceof Error?error.message:'保存を再開できませんでした。','warn');
     }finally {batchBusy=false;updateCloudStatus();render();}
   })();});
+}
+
+function renderSortControls(): void {
   for (const [key, id] of [['usedOn', 'sort-date'], ['amount', 'sort-amount']] as const) {
     const button = $<HTMLButtonElement>(id);
     const direction = previewSort?.key === key ? previewSort.direction : null;
@@ -1069,6 +1084,38 @@ function renderManagerDrilldownBreakdown():void {
   }
 }
 
+/** Update editing feedback without replacing inputs, rows or action buttons. */
+function updateManagerEditState(s:ParsedStatement):void {
+  $('manage-status').textContent=hasUnsavedChanges(s)?'未保存の変更':'保存済み';
+  $('manage-points').querySelector('strong')!.textContent=`${statementPoints(s,liveVault?.unlocked?liveVault.assetSettings().cardPreferences:undefined).toLocaleString('ja-JP')} pt`;
+  $<HTMLButtonElement>('manage-save').disabled=batchBusy||filesBusy||!hasUnsavedChanges(s);
+  const errors=displayIssues(s);
+  $('manage-validation').textContent=errors.length?`要修正：${errors.join(' / ')}`:cardSelectionPending(s)?'カード選択待ち':hasUnsavedChanges(s)?'変更は保存ボタンを押すまで反映されません。':'検証OK。';
+  const selected=$('manage-list').querySelector<HTMLElement>('.statement-card.selected');
+  const flag=selected?.querySelector<HTMLElement>('.statement-flag');
+  if(selected&&flag){
+    const state=errors.length?'review':cardSelectionPending(s)?'selection':s.confirmation==='provisional'?'provisional':'verified';
+    selected.className=`statement-card ${state} selected`;
+    flag.className=`statement-flag ${state}`;
+    flag.textContent=s.sourceKind==='csv'&&!s.paymentDate?'引落日未設定':state==='review'?'要確認':state==='selection'?'カード選択待ち':state==='provisional'?'暫定明細':'照合OK';
+  }
+}
+
+function updateManagerMerchantMetadata(control:HTMLElement,row:ImportRow,s:ParsedStatement):void {
+  const secondary=div('manage-merchant-secondary');
+  const category=categoryFor(row,s);
+  if(category)secondary.append(categoryChip(category));
+  else secondary.append(div('category-chip manage-uncategorized','未分類'));
+  const currentDisplay=merchantFor(row,s).trim();
+  const originalMerchant=row.merchant.trim();
+  if(originalMerchant&&currentDisplay!==originalMerchant){
+    const original=div('manage-source-text',`原文：${row.merchant}`);
+    original.title=row.merchant;secondary.append(original);
+  }
+  const old=control.querySelector('.manage-merchant-secondary');
+  if(old)old.replaceWith(secondary);else control.append(secondary);
+}
+
 function renderManager(): void {
   const indices = renderManagerFilters();
   renderManagerDrilldownBreakdown();
@@ -1087,18 +1134,14 @@ function renderManager(): void {
   renderCardOptions(s);
   $('manage-month').textContent = s.billingMonth ? `${s.billingMonth.slice(0,4)}年${Number(s.billingMonth.slice(5))}月` : '未取得';
   $('manage-payment').textContent = dateDisplay(s.paymentDate);
-  $('manage-status').textContent = hasUnsavedChanges(s) ? '未保存の変更' : '保存済み';
-  $('manage-points').querySelector('strong')!.textContent=`${statementPoints(s,liveVault?.unlocked?liveVault.assetSettings().cardPreferences:undefined).toLocaleString('ja-JP')} pt`;
   const originalButton=$<HTMLButtonElement>('manage-original-download');
   const savedId=savedIds.get(s);
   originalButton.disabled=batchBusy||filesBusy||!liveVault?.unlocked||!savedId||
     !liveVault.records().some(record=>record.id===savedId&&!!record.originalId);
   originalButton.title=s.sourceKind==='pdf'?'復号したPDFが端末のダウンロード先に保存されます。':'CSV・テキスト貼り付け明細にPDF原本はありません。';
-  $<HTMLButtonElement>('manage-save').disabled = batchBusy || filesBusy || !hasUnsavedChanges(s);
   $<HTMLButtonElement>('manage-add-row').disabled=!!activeAnalysisDrilldown;
   $<HTMLButtonElement>('manage-delete').disabled = batchBusy || filesBusy;
-  const errorMessages = displayIssues(s);
-  $('manage-validation').textContent = errorMessages.length ? `要修正：${errorMessages.join(' / ')}` : cardSelectionPending(s) ? 'カード選択待ち' : hasUnsavedChanges(s)?'変更は保存ボタンを押すまで反映されません。':'検証OK。';
+  updateManagerEditState(s);
   for (const [key,id,label] of [['usedOn','manage-sort-date','利用日'],['amount','manage-sort-amount','金額']] as const) {
     const button=$<HTMLButtonElement>(id);
     const active=manageSort?.key===key;
@@ -1112,24 +1155,35 @@ function renderManager(): void {
     .filter(item=>!activeAnalysisDrilldown||matchingRows?.has(item.row.id));
   for (const {index,row} of orderedPreviewRows(visibleRows,manageSort)) {
     const tr = document.createElement('tr');
-    const fields: Array<[string,string,(v:string)=>void]> = [
-      [dateDisplay(row.usedOn), '利用日', value => {
+    const fields: Array<[string,string,(v:string,input:HTMLInputElement)=>void]> = [
+      [row.usedOn, '利用日', (value,input) => {
         const next = value.trim().replace(/\//g,'-');
-        if (!validDate(next)) { toast('利用日は YYYY/MM/DD で入力してください'); renderManager(); return; }
-        row.usedOn = next; markDirty(s);
+        if (!validDate(next)) { toast('有効な利用日を選択してください'); input.value=row.usedOn; return; }
+        if(next===row.usedOn)return;
+        row.usedOn = next; markManagerInlineDirty(s);
       }],
-      [merchantFor(row,s), '利用先', value => {
+      [merchantFor(row,s), '利用先', (value,input) => {
         const requested=value.trim();
         const defaultDisplay=displayMerchant(row.merchant,s.cardId,rules());
+        const previous=row.merchantOverride;
         if(!requested || requested===defaultDisplay || requested===row.merchant) delete row.merchantOverride;
         else row.merchantOverride=requested;
-        markDirty(s);
+        if(previous===row.merchantOverride)return;
+        const control=input.closest<HTMLElement>('.manage-merchant-control');
+        if(control)updateManagerMerchantMetadata(control,row,s);
+        markManagerInlineDirty(s);
       }],
-      [row.amount.toLocaleString('ja-JP'), '金額', value => {
-        if (!/^-?(?:\d+|\d{1,3}(?:,\d{3})+)$/.test(value.trim())) { toast('金額は整数で入力してください'); renderManager(); return; }
-        row.amount = Number(value.replace(/,/g,'')); markDirty(s);
+      [row.amount.toLocaleString('ja-JP'), '金額', (value,input) => {
+        if (!/^-?(?:\d+|\d{1,3}(?:,\d{3})+)$/.test(value.trim())) { toast('金額は整数で入力してください'); input.value=row.amount.toLocaleString('ja-JP'); return; }
+        const next=Number(value.replace(/,/g,''));
+        if(!Number.isSafeInteger(next)){toast('金額が大きすぎます');input.value=row.amount.toLocaleString('ja-JP');return;}
+        if(next===row.amount)return;
+        row.amount=next;markManagerInlineDirty(s);
       }],
-      [row.description ?? '', '補足', value => { row.description = value.trim(); markDirty(s); }],
+      [row.description ?? '', '補足', value => {
+        const next=value.trim();if(next===(row.description??''))return;
+        row.description=next;markManagerInlineDirty(s);
+      }],
     ];
     for (const [value, aria, update] of fields) {
       const td = document.createElement('td');
@@ -1138,17 +1192,7 @@ function renderManager(): void {
       if(aria==='利用先') {
         const cell=div('manage-merchant-control manage-merchant-quiet');
         const main=div('manage-merchant-main');main.append(field);cell.append(main);
-        const secondary=div('manage-merchant-secondary');
-        const category=categoryFor(row,s);
-        if(category)secondary.append(categoryChip(category));
-        else secondary.append(div('category-chip manage-uncategorized','未分類'));
-        const currentDisplay=merchantFor(row,s).trim();
-        const originalMerchant=row.merchant.trim();
-        if(originalMerchant && currentDisplay!==originalMerchant){
-          const original=div('manage-source-text',`原文：${row.merchant}`);
-          original.title=row.merchant;secondary.append(original);
-        }
-        if(secondary.childElementCount)cell.append(secondary);
+        updateManagerMerchantMetadata(cell,row,s);
         td.append(cell);
       }else td.append(field);
       tr.append(td);
@@ -1838,6 +1882,7 @@ function init(): void {
   $('nav-future').addEventListener('click',()=>showView('future'));
   $('nav-settings').addEventListener('click',()=>showView('settings'));
   $('import-payment-settings').addEventListener('click',()=>showView('settings'));
+  initCloudActionControls();
   initPasswordFields();
   initTheme();
   let sidebarCollapsed=false;

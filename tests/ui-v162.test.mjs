@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -7,8 +8,8 @@ const css=readFileSync(join(root,'public/styles/ui-v162.css'),'utf8');
 const html=readFileSync(join(root,'public/index.html'),'utf8');
 
 test('v1.6.2 rule spacing CSS is loaded exactly once after v1.6.1',()=>{
-  assert.match(html,/ui-v161\.css[\s\S]*ui-v162\.css/);
-  assert.equal((html.match(/ui-v162\.css/g)??[]).length,1);
+  assert.match(styleOrder,/ui-v161\.css[\s\S]*ui-v162\.css/);
+  assert.equal((styleOrder.match(/ui-v162\.css/g)??[]).length,1);
 });
 test('rule form changes are scoped to narrow screens and leave desktop styles untouched',()=>{
   assert.match(css,/@media\s*\(max-width:\s*700px\)/);

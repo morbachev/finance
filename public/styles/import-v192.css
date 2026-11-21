@@ -21,3 +21,24 @@
 .import-revision-override-warning.hidden{display:none}
 .import-revision-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:9px}
 @media(max-width:500px){.import-revision-inner{padding:15px}.import-revision-actions button{flex:1}}
+
+/* No drafts: the file selector is the entire workflow, not an empty editor. */
+#import-view:not(.has-import-drafts)>.results-grid,
+#import-view:not(.has-import-drafts)>.batch-bar{display:none!important}
+#import-view:not(.has-import-drafts) #entry-accordion{
+  width:100%;max-width:660px;margin:0 auto;
+}
+#import-view:not(.has-import-drafts) #entry-accordion>.import-panel{
+  min-height:0!important;margin-bottom:0!important;
+}
+@media(min-width:981px){
+  #import-view:not(.has-import-drafts):not(.hidden){
+    min-height:0!important;height:auto!important;display:block!important;
+  }
+}
+@media(max-width:800px){
+  #import-view:not(.has-import-drafts):not(.hidden){
+    min-height:0!important;height:auto!important;overflow:visible!important;
+  }
+  #import-view:not(.has-import-drafts) #entry-accordion{max-width:540px}
+}

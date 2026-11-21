@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -97,7 +98,7 @@ test('different card decisions merge; same key edits require approval',()=>{
 test('screen includes separate analysis-only actions, and tracks new navigation',()=>{
   const html=readFileSync(new URL('../dist/index.html',import.meta.url),'utf8');
   assert.match(html,/id="nav-subscriptions"/);assert.match(html,/id="subscriptions-content"/);
-  assert.match(html,/subscriptions-v183.css/);
+  assert.match(styleOrder,/subscriptions-v183.css/);
   const js=readFileSync(new URL('../dist/src/ui/subscriptions.js',import.meta.url),'utf8');
   assert.match(js,/今回は対象外/);assert.match(js,/カード払い/);
   const main=readFileSync(new URL('../src/main.ts',import.meta.url),'utf8');

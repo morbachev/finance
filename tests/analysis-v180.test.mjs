@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -98,7 +99,7 @@ test('new navigation, summary deep link and view preserve lock and existing anal
  const summary=readFileSync(new URL('../src/ui/monthly-summary.ts',import.meta.url),'utf8');
  const analytics=readFileSync(new URL('../src/ui/analysis.ts',import.meta.url),'utf8');
  assert.match(html,/id="nav-analysis"/);assert.match(html,/id="analysis-view"/);
- assert.match(html,/analysis-v180\.css/);assert.match(main,/summaryUi\?\.setPeriod\(period\)/);
+ assert.match(styleOrder,/analysis-v180\.css/);assert.match(main,/summaryUi\?\.setPeriod\(period\)/);
  assert.match(summary,/setPeriod:\(next:string\)/);assert.match(analytics,/if\(!source\)/);
  assert.match(analytics,/root!\.replaceChildren\(\)/);
 });

@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -51,5 +52,5 @@ test('mobile: menu items retain standard 13px instead of 10/11px',()=>{
 test('mobile: no finance data model, encryption or salary rules are touched',()=>{
   assert.doesNotMatch(css,/@media \(min-width:/);
   assert.match(html,/id="nav-payroll"[^>]*target="_blank"/);
-  assert.match(html,/styles\/mobile-v151\.css/);
+  assert.match(styleOrder,/styles\/mobile-v151\.css/);
 });

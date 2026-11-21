@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -7,7 +8,7 @@ const css=readFileSync(new URL('../public/styles/ui-v164.css',import.meta.url),'
 const main=readFileSync(new URL('../src/main.ts',import.meta.url),'utf8');
 
 test('v1.6.4 desktop-only rules loaded after v1.6.3',()=>{
-  assert.match(html,/styles\/ui-v163\.css[\s\S]*styles\/ui-v164\.css/);
+  assert.match(styleOrder,/styles\/ui-v163\.css[\s\S]*styles\/ui-v164\.css/);
   assert.match(css,/@media \(min-width: 981px\)/);
   assert.doesNotMatch(css,/@media \(max-width:/);
 });

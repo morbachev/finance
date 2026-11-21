@@ -1,3 +1,4 @@
+import {styleOrder} from './helpers/css-loading.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -35,5 +36,5 @@ test('category add is neutral while OneDrive save retains primary styling', () =
 });
 
 test('new UI stylesheet loads last', () => {
-  assert.ok(html.indexOf('styles/ui-v154.css') > html.indexOf('styles/ui-v153.css'));
+  assert.ok(styleOrder.indexOf('styles/ui-v154.css') > styleOrder.indexOf('styles/ui-v153.css'));
 });

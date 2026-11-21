@@ -29,10 +29,12 @@ test('v1.6.5 last menu is remembered per tab and restored across reloads',()=>{
   assert.doesNotThrow(()=>saveLastView({setItem(){throw Error('denied');}},'assets'));
 });
 
-test('initial route restores stored selection and cloud failures do not override it',()=>{
-  assert.match(main,/const lastView = readLastView\(sessionStorageSafe\(\)\);\s*showView\(lastView\?\?'home'\);/);
+test('initial route is always Home, and cloud failures do not override it',()=>{
+  assert.match(main,/showView\('home'\);/);
+  assert.doesNotMatch(main,/showView\(lastView\?\?/);
+  assert.doesNotMatch(main,/if \(!readLastView/);
   assert.match(main,/function showView\(view: FinanceView\)[\s\S]*?saveLastView\(sessionStorageSafe\(\), view\);/);
-  assert.equal((main.match(/if \(!readLastView\(sessionStorageSafe\(\)\)\) showView\('settings'\);/g)||[]).length,2);
+  assert.doesNotMatch(main.split('async function startCloud()')[1].split('async function refreshCloud()')[0],/showView\('settings'\)/);
   assert.match(main,/manage-back-summary[\s\S]*?scrollTop=summaryReturnContentY;[\s\S]*?scrollTo\(0,summaryReturnPageY\)/);
 });
 

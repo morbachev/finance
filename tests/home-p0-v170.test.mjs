@@ -123,14 +123,15 @@ test('uncategorized, stale balance, payroll and invalid statement actions remain
   assert.ok(homeOverview(s,today).actions.some(x=>x.kind==='payroll'&&x.target==='settings'));
 });
 
-test('UI has home first, route restoration, locked-data protection and safe text rendering',()=>{
+test('UI has home first on reload, locked-data protection and safe text rendering',()=>{
   const html=readFileSync(new URL('../public/index.html',import.meta.url),'utf8');
   const main=readFileSync(new URL('../src/main.ts',import.meta.url),'utf8');
   const home=readFileSync(new URL('../src/ui/home.ts',import.meta.url),'utf8');
   const css=readFileSync(new URL('../public/styles/home-v170.css',import.meta.url),'utf8');
   assert.ok(html.indexOf('id="nav-home"')<html.indexOf('id="nav-import"'));
   assert.ok(html.indexOf('id="home-view"')<html.indexOf('id="import-view"'));
-  assert.match(main,/showView\(lastView\?\?'home'\)/);
+  assert.match(main,/showView\('home'\);/);
+  assert.doesNotMatch(main,/showView\(lastView/);
   assert.match(home,/if\(!source\)/);
   assert.match(home,/textContent=content/);
   assert.doesNotMatch(home,/innerHTML/);

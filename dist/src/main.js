@@ -21,7 +21,7 @@ import { initFutureProjection } from './ui/future-projection.js'; /* finance-v14
 import { canonicalStatementFilename } from './ui/statement-filename.js';
 import { initMonthlySummary } from './ui/monthly-summary.js'; /* finance-monthly-v140 */
 import { initPasswordFields, hidePasswordField, clearPasswordField } from './ui/password-fields.js';
-import { readLastView, saveLastView } from './ui/view-preference.js';
+import { saveLastView } from './ui/view-preference.js';
 import { initHome } from './ui/home.js';
 import { initAnalysis } from './ui/analysis.js';
 import { analysisDrilldownMatches, analysisDrilldownBreakdown, drilldownPeriodLabel } from './ui/analysis-drilldown.js';
@@ -805,16 +805,12 @@ async function startCloud() {
                 await askVault('unlock');
         }
         else {
-            if (!readLastView(sessionStorageSafe()))
-                showView('settings');
             updateCloudStatus();
             operationResult('現在のMicrosoftアカウントのアプリ領域にFinance保管庫が見つかりません。既存データを探している場合は、MicrosoftアカウントとClient IDを確認してください。', 'bad');
         }
     }
     catch (error) {
         finishActivity('OneDrive');
-        if (!readLastView(sessionStorageSafe()))
-            showView('settings');
         updateCloudStatus(`OneDriveに接続してください：${error instanceof Error ? error.message : '接続エラー'}`);
         showCloudConnectDialog(cloudConnectPrompt());
     }
@@ -1107,6 +1103,9 @@ function setMobileMenuOpen(requested) {
     const sidebar = document.getElementById('finance-sidebar');
     const toggle = document.getElementById('mobile-nav-toggle');
     const panel = document.getElementById('mobile-nav-panel');
+    if (expanded && sidebar) {
+        sidebar.style.setProperty('--finance-mobile-header-height', `${Math.ceil(sidebar.getBoundingClientRect().height)}px`);
+    }
     sidebar?.classList.toggle('mobile-open', expanded);
     if (toggle) {
         toggle.setAttribute('aria-expanded', String(expanded));
@@ -1882,7 +1881,8 @@ function modalClose(success) {
     modalResolve = null;
 }
 function askVault(mode) {
-    if ($('vault-dialog').open)
+    // A hidden dialog can still have an in-flight unlock; never replace its resolver.
+    if (currentModal !== null || $('vault-dialog').open)
         return Promise.resolve(false);
     return new Promise(resolve => {
         modalResolve = resolve;
@@ -1897,12 +1897,14 @@ function askVault(mode) {
         hidePasswordField('vault-passphrase');
         hidePasswordField('vault-passphrase-confirm');
         $('vault-dialog-title').textContent = mode === 'create' ? 'OneDrive保管庫の新規作成' : mode === 'migrate' ? '旧データをOneDriveへ移行' : 'OneDrive保管庫のロック解除';
-        $('vault-dialog-copy').textContent = mode === 'create'
+        const unlockDescription = mode === 'create'
             ? 'OneDriveに暗号化保管庫を作成します。12文字以上のパスフレーズを1Passwordに保存してください。'
             : mode === 'migrate' ? '旧ブラウザ保存に使ったパスフレーズを入力します。移行後も同じパスフレーズでOneDriveを解除できます。'
                 : liveVault?.needsLayoutMigration
                     ? '旧v1.0の保管庫が見つかりました。復号後、年別フォルダへ暗号化データとPDFを安全に移行します。旧データは削除しません。移行完了後は古いv1.0からの編集を避けてください。'
-                    : 'OneDriveの暗号化明細を取得しました。1Passwordから専用パスフレーズを入力してください。';
+                    : '';
+        $('vault-dialog-copy').textContent = unlockDescription;
+        $('vault-dialog-copy').classList.toggle('hidden', !unlockDescription);
         $('vault-submit').textContent = mode === 'create' ? '暗号化保管庫を作成' : mode === 'migrate' ? '暗号化して移行' : '復号して開く';
         $('vault-dialog').showModal();
         pass.focus();
@@ -2347,6 +2349,7 @@ function initTheme() {
 function init() {
     // Register navigation before complex initializers. A failure later must not
     // prevent opening Settings to investigate the startup problem.
+    $('brand-home').addEventListener('click', () => showView('home'));
     $('nav-home').addEventListener('click', () => showView('home'));
     $('manage-back-home').addEventListener('click', () => showView('home'));
     $('import-back-home').addEventListener('click', () => showView('home'));
@@ -2793,6 +2796,11 @@ function init() {
                 return;
             }
             submit.disabled = true;
+            // The global loading surface owns progress. Keep the unlock dialog out
+            // of the way while OneDrive downloads/decrypts; reopen on a real failure.
+            const vaultDialog = $('vault-dialog');
+            if (vaultDialog.open)
+                vaultDialog.close();
             try {
                 if (!liveVault)
                     throw new Error('Microsoftアカウントへの接続が必要です。');
@@ -2849,14 +2857,19 @@ function init() {
             }
             catch (error) {
                 $('vault-error').textContent = error instanceof Error ? error.message : '認証できませんでした。';
+                // Keep the original askVault promise active so the user can retry.
+                if (currentModal === mode && !vaultDialog.open) {
+                    vaultDialog.showModal();
+                    $('vault-passphrase').focus();
+                }
             }
             finally {
                 submit.disabled = false;
             }
         })();
     });
-    const lastView = readLastView(sessionStorageSafe());
-    showView(lastView ?? 'home');
+    // Every fresh app load starts on Home, regardless of the prior tab route.
+    showView('home');
     void refreshVaultControls();
     render();
     document.documentElement.dataset.financeReady = 'true';

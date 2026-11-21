@@ -61,12 +61,12 @@
   <link rel="stylesheet" href="./styles/points-workspace-v1914.css">
   <link rel="stylesheet" href="./styles/navigation-payroll-v1915.css">
   <link rel="stylesheet" href="./styles/navigation-polish-v1916.css">
+  <link rel="stylesheet" href="./styles/mobile-finish-v1922.css">
 </head>
 <body>
   <div class="app-shell">
     <aside id="finance-sidebar" class="sidebar">
-      <div class="brand"><div class="brand-mark">F<span>.</span></div><div class="brand-copy"><b>Finance</b><small>Statement workspace</small></div>
-      </div>
+      <button id="brand-home" class="brand" type="button" aria-label="ホームへ戻る" title="ホームへ戻る" data-nav-label="ホームへ戻る"><span class="brand-mark" aria-hidden="true">F<span>.</span></span><span class="brand-copy" aria-hidden="true"><b>Finance</b><small>Statement workspace</small></span></button>
       <button id="mobile-theme-toggle" class="mobile-theme-toggle" type="button" aria-label="ダークモードに切り替える" title="ダークモードに切り替える">
         <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path class="mobile-theme-moon" d="M20.5 13.1A8.6 8.6 0 0 1 10.9 3.5 8.6 8.6 0 1 0 20.5 13.1Z"/>
@@ -777,7 +777,7 @@
     <form id="vault-form" class="vault-form">
       <div class="vault-icon" aria-hidden="true">⌑</div>
       <h2 id="vault-dialog-title">保存領域のロック解除</h2>
-      <p id="vault-dialog-copy">1Passwordに保存した専用パスフレーズを入力してください。</p>
+      <p id="vault-dialog-copy" class="hidden"></p>
       <label class="field-label" for="vault-passphrase">専用パスフレーズ</label>
       <div class="password-control">
         <input id="vault-passphrase" name="finance-vault-passphrase" type="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" required minlength="1" spellcheck="false">

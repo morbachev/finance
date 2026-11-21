@@ -35,3 +35,7 @@
  .reports-row{font-size:12px;gap:10px}
  .reports-controls{gap:8px}
 }
+
+/* Save/read errors remain next to the affected report until retry or navigation. */
+.reports-feedback-error{margin:0;padding:11px 13px;border:1px solid #d9979f;border-radius:var(--radius-control);background:#fff0f1;color:#93383f;font-size:12px;line-height:1.65;overflow-wrap:anywhere}
+[data-theme="dark"] .reports-feedback-error{background:#37262f;border-color:#81515f;color:#ffbec4}

@@ -1,4 +1,5 @@
 import { showActivity } from './activity-feedback.js';
+import { CloudWriteUncertainError } from '../cloud/live-vault.js';
 /** Card subscription suggestions and decisions. All writes are explicit. */
 import type { MonthlySource } from '../summary/monthly-summary.js';
 import type { LiveVault } from '../cloud/live-vault.js';
@@ -17,13 +18,13 @@ function button(label:string,click:()=>void,cls='secondary-action'):HTMLButtonEl
 export function initSubscriptions(deps:Deps):SubscriptionsUi {
   const root=document.getElementById('subscriptions-content');if(!root)throw new Error('定期支出画面が見つかりません。');
   let filter:'candidate'|'registered'|'ignored'='candidate';
-  let busy=false,notice='',failed=false;
-  function reset():void {filter='candidate';busy=false;notice='';failed=false;root!.replaceChildren();}
+  let busy=false,notice='';
+  function reset():void {filter='candidate';busy=false;notice='';root!.replaceChildren();}
   async function update(key:string,decision:CardRecurringDecision|null):Promise<void>{
     const vault=deps.vault();if(busy||!vault?.unlocked)return;
-    busy=true;notice='';failed=false;showActivity('定期支出の設定を保存中…','working');render();
+    busy=true;notice='';showActivity('定期支出の設定を保存中…','working');render();
     try{await vault.setCardRecurringDecision(key,decision);notice='';showActivity(decision?'定期支出を保存しました。':'候補に戻しました。','good');deps.onSaved();}
-    catch(error){notice='';showActivity(error instanceof Error?error.message:'保存に失敗しました','bad');failed=true;}
+    catch(error){notice=`${error instanceof CloudWriteUncertainError?'保存結果未確認':'保存失敗'}：${error instanceof Error?error.message:'通信エラー'}`;showActivity(notice,'bad');}
     finally{busy=false;render();}
   }
   function card(name:string,sub:string,amount:string,description:string,actions:HTMLElement[]):HTMLElement {
@@ -46,11 +47,12 @@ export function initSubscriptions(deps:Deps):SubscriptionsUi {
     const ignored=Object.entries(decisions).filter(([,value])=>value.state==='ignored');
     const tabs=el('div','subscriptions-tabs');
     for(const [key,label,count] of [['candidate','候補',pending.length],['registered','登録済み',registered.length],['ignored','対象外',ignored.length]] as const){
-      const control=button(`${label} ${count}`,()=>{filter=key;notice='';failed=false;render();},'subscriptions-tab'+(filter===key?' selected':''));
+      const control=button(`${label} ${count}`,()=>{filter=key;render();},'subscriptions-tab'+(filter===key?' selected':''));
       control.setAttribute('aria-pressed',String(filter===key));tabs.append(control);
     }
     root!.append(tabs);
-    // Operation feedback uses the shared lower-right activity card.
+    if(notice){const error=el('p','subscriptions-notice error',notice);error.setAttribute('role','alert');root!.append(error);}
+    // Failed/uncertain writes remain visible here after the activity card disappears.
     const list=el('div','subscriptions-list');
     const details=(item:SubscriptionCandidate)=>`${item.months.length}回 · ${item.months.slice(-4).join(' / ')}${item.months.length>4?' ほか':''} · ${item.minAmount===item.maxAmount?'同額':`${yen(item.minAmount)}〜${yen(item.maxAmount)}`}`;
     if(filter==='candidate'){

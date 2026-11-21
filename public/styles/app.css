@@ -3567,6 +3567,10 @@ input::placeholder,textarea::placeholder{color:var(--finance-placeholder)!import
  .reports-controls{gap:8px}
 }
 
+/* Save/read errors remain next to the affected report until retry or navigation. */
+.reports-feedback-error{margin:0;padding:11px 13px;border:1px solid #d9979f;border-radius:var(--radius-control);background:#fff0f1;color:#93383f;font-size:12px;line-height:1.65;overflow-wrap:anywhere}
+[data-theme="dark"] .reports-feedback-error{background:#37262f;border-color:#81515f;color:#ffbec4}
+
 /* SOURCE: subscriptions-v183.css */
 .subscriptions-view{min-width:0}
 .subscriptions-content{display:grid;gap:16px;min-width:0}
@@ -3589,6 +3593,10 @@ input::placeholder,textarea::placeholder{color:var(--finance-placeholder)!import
 .subscriptions-notice{margin:0;color:var(--accent,#439d7c)}
 .subscriptions-notice.error{color:var(--danger,#bc4040)}
 @media(max-width:560px){.subscriptions-list{grid-template-columns:minmax(0,1fr)}.subscriptions-card-heading{flex-wrap:wrap}.subscriptions-tabs>*{flex:1 1 auto}}
+
+/* Failed/uncertain card subscription writes must remain readable in dark mode. */
+.subscriptions-notice.error{padding:11px 13px;border:1px solid #d9979f;border-radius:var(--radius-control);background:#fff0f1;color:#93383f;font-size:12px;line-height:1.65;overflow-wrap:anywhere}
+[data-theme="dark"] .subscriptions-notice.error{background:#37262f;border-color:#81515f;color:#ffbec4}
 
 /* SOURCE: bank-chart-v184.css */
 /* Finance 1.8.4: interactive daily Rakuten Bank timeline; no financial data changes. */

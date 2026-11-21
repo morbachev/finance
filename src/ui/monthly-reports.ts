@@ -2,7 +2,7 @@ import { showActivity, finishActivity } from './activity-feedback.js';
 /** P1-B monthly report archive. Nothing is written without pressing Save. */
 import { reportSnapshot, snapshotHash, type MonthlyReportDocument, type ReportRevision, type ReportSnapshot } from '../reports/monthly-report.js';
 import type { MonthlySource } from '../summary/monthly-summary.js';
-import type { LiveVault } from '../cloud/live-vault.js';
+import { CloudWriteUncertainError, type LiveVault } from '../cloud/live-vault.js';
 import {monthNavigator} from './period-navigator.js';
 import { pointBenefitsSection } from './point-benefits.js';
 
@@ -70,7 +70,7 @@ export function initMonthlyReports(deps:MonthlyReportsDeps):MonthlyReportsUi {
       draft=held?.note??document?.current.note??'';changed=false;loadFailed=false;chosenRevision=null;
       // Only decrypted in the unlocked session. Do not cache report bodies in browser storage.
       message='';
-    }catch(error){if(id!==request)return;loadedPeriod=selected;loadFailed=true;archive=null;periods=[];message=error instanceof Error?error.message:'レポートを取得できませんでした。';}
+    }catch(error){if(id!==request)return;loadedPeriod=selected;loadFailed=true;archive=null;periods=[];message=`取得失敗：${error instanceof Error?error.message:'レポートを取得できませんでした。'}`;}
     finally{if(id===request){busy=false;finishActivity('月次レポート');if(loadFailed)showActivity(message,'bad');render();if(!loadFailed&&archive)void compareSource();}}
   }
   async function save():Promise<void>{
@@ -82,7 +82,7 @@ export function initMonthlyReports(deps:MonthlyReportsDeps):MonthlyReportsUi {
       archive=result;loadedPeriod=selected;draft=result.current.note;drafts.delete(selected);changed=false;draftConflict=false;chosenRevision=null;
       if(!periods.includes(selected))periods=[selected,...periods].sort().reverse();
       message='';showActivity('月次レポートを保存しました。','good');
-    }catch(error){message='';showActivity(error instanceof Error?error.message:'保存できませんでした。','bad');}
+    }catch(error){message=`${error instanceof CloudWriteUncertainError?'保存結果未確認':'保存失敗'}：${error instanceof Error?error.message:'保存できませんでした。'}`;showActivity(message,'bad');}
     finally{busy=false;render();}
   }
   async function compareSource():Promise<void>{
@@ -101,9 +101,9 @@ export function initMonthlyReports(deps:MonthlyReportsDeps):MonthlyReportsUi {
     if(busy)nav.querySelectorAll('button,input').forEach(item=>{(item as HTMLButtonElement|HTMLInputElement).disabled=true;});
     const refresh=button('最新を取得',()=>{void fetch();});refresh.disabled=busy;
     top.append(nav,refresh);container.append(top);
-    // Feedback is transient and shown in the shared lower-right activity card.
+    // Keep failures beside the operation, even after the activity card expires.
     if(busy)return;
-    if(loadFailed)return;
+    if(loadFailed){const error=el('p','reports-feedback-error',message);error.setAttribute('role','alert');container.append(error);return;}
     if(loadedPeriod!==selected){void fetch();return;}
     if(periods.length){
       const list=el('div','reports-period-list');list.append(el('span','reports-muted','保存済み'));
@@ -111,6 +111,7 @@ export function initMonthlyReports(deps:MonthlyReportsDeps):MonthlyReportsUi {
       container.append(list);
     }
     const control=section(month(selected));
+    if(message){const error=el('p','reports-feedback-error',message);error.setAttribute('role','alert');control.body.append(error);}
     const state=archive?.current;
     control.body.append(el('p','reports-muted',state?`保存：${new Date(state.savedAt).toLocaleString('ja-JP')}`:'まだレポートがありません。'));
     if(changed&&state)control.body.append(el('p','reports-quality','明細や設定に変更があります。レポートを更新できます。'));

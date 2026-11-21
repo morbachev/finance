@@ -19,3 +19,7 @@
 .subscriptions-notice{margin:0;color:var(--accent,#439d7c)}
 .subscriptions-notice.error{color:var(--danger,#bc4040)}
 @media(max-width:560px){.subscriptions-list{grid-template-columns:minmax(0,1fr)}.subscriptions-card-heading{flex-wrap:wrap}.subscriptions-tabs>*{flex:1 1 auto}}
+
+/* Failed/uncertain card subscription writes must remain readable in dark mode. */
+.subscriptions-notice.error{padding:11px 13px;border:1px solid #d9979f;border-radius:var(--radius-control);background:#fff0f1;color:#93383f;font-size:12px;line-height:1.65;overflow-wrap:anywhere}
+[data-theme="dark"] .subscriptions-notice.error{background:#37262f;border-color:#81515f;color:#ffbec4}

@@ -1,6 +1,7 @@
 import { showActivity, finishActivity } from './activity-feedback.js';
 /** P1-B monthly report archive. Nothing is written without pressing Save. */
 import { reportSnapshot, snapshotHash } from '../reports/monthly-report.js';
+import { CloudWriteUncertainError } from '../cloud/live-vault.js';
 import { monthNavigator } from './period-navigator.js';
 import { pointBenefitsSection } from './point-benefits.js';
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
@@ -129,7 +130,7 @@ export function initMonthlyReports(deps) {
             loadFailed = true;
             archive = null;
             periods = [];
-            message = error instanceof Error ? error.message : 'レポートを取得できませんでした。';
+            message = `取得失敗：${error instanceof Error ? error.message : 'レポートを取得できませんでした。'}`;
         }
         finally {
             if (id === request) {
@@ -167,8 +168,8 @@ export function initMonthlyReports(deps) {
             showActivity('月次レポートを保存しました。', 'good');
         }
         catch (error) {
-            message = '';
-            showActivity(error instanceof Error ? error.message : '保存できませんでした。', 'bad');
+            message = `${error instanceof CloudWriteUncertainError ? '保存結果未確認' : '保存失敗'}：${error instanceof Error ? error.message : '保存できませんでした。'}`;
+            showActivity(message, 'bad');
         }
         finally {
             busy = false;
@@ -209,11 +210,15 @@ export function initMonthlyReports(deps) {
         refresh.disabled = busy;
         top.append(nav, refresh);
         container.append(top);
-        // Feedback is transient and shown in the shared lower-right activity card.
+        // Keep failures beside the operation, even after the activity card expires.
         if (busy)
             return;
-        if (loadFailed)
+        if (loadFailed) {
+            const error = el('p', 'reports-feedback-error', message);
+            error.setAttribute('role', 'alert');
+            container.append(error);
             return;
+        }
         if (loadedPeriod !== selected) {
             void fetch();
             return;
@@ -229,6 +234,11 @@ export function initMonthlyReports(deps) {
             container.append(list);
         }
         const control = section(month(selected));
+        if (message) {
+            const error = el('p', 'reports-feedback-error', message);
+            error.setAttribute('role', 'alert');
+            control.body.append(error);
+        }
         const state = archive?.current;
         control.body.append(el('p', 'reports-muted', state ? `保存：${new Date(state.savedAt).toLocaleString('ja-JP')}` : 'まだレポートがありません。'));
         if (changed && state)

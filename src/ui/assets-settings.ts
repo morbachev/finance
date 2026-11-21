@@ -26,12 +26,16 @@ function make(tag:string,className?:string,content?:string):HTMLElement {
   const node=document.createElement(tag);if(className)node.className=className;
   if(content!==undefined)node.textContent=content;return node;
 }
-function status(node:HTMLElement,message:string,error=false):void {
+export function status(node:HTMLElement,message:string,error=false):void {
   // A risk that affects financial projections must remain visible beside its form.
   const important=/二重計上|注意：|登録されています/.test(message);
-  node.textContent=important?message:'';
+  // Persist failures (including unconfirmed writes) at the action site, while
+  // successful saves and progress remain ephemeral in the shared activity card.
+  node.textContent=error||important?message:'';
   node.classList.toggle('bad',error);
-  if(message && !important)simpleActivity(message,error);
+  if(error)node.setAttribute('role','alert');
+  else node.removeAttribute('role');
+  if(message && (error||!important))simpleActivity(message,error);
 }
 /** An ambiguous Graph write must never be described as a definite save failure. */
 function mutationError(error:unknown,action:'保存'|'削除'|'解除'='保存'):string {
@@ -50,6 +54,11 @@ function frequencyLabel(e:RecurringEntry):string {
   if(e.frequency==='weekly')return `毎週${weekdayLabels[e.weekday??0]}曜日`;
   const day=e.dayOfMonth===0?'末日':`${e.dayOfMonth}日`;
   return e.frequency==='monthly'?`毎月${day}`:`毎年${e.monthOfYear}月${day}`;
+}
+
+/** Editing the same row is safe; switching another row must protect an unsaved draft. */
+export function recurringSwitchNeedsConfirmation(dirty:boolean,editingId:string|null,nextId:string):boolean {
+  return editingId!==nextId&&(dirty||editingId!==null);
 }
 
 export interface AssetsUi {
@@ -141,6 +150,14 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
       enabled:$<HTMLInputElement>('assets-recurring-enabled').checked,
     };
     return validateRecurring(entry);
+  }
+  function openRecurringEditor(item:RecurringEntry):boolean {
+    if(busy)return false;
+    // Re-selecting the current entry must not overwrite its in-progress draft.
+    if(editingId===item.id){$('assets-recurring-form').scrollIntoView({behavior:'smooth',block:'start'});return true;}
+    if(recurringSwitchNeedsConfirmation(dirty,editingId,item.id)&&!window.confirm('編集中の入力を破棄して、指定した定期入出金を開きますか？'))return false;
+    populateForm(item);
+    return true;
   }
   function populateForm(item:RecurringEntry):void {
     editingId=item.id;dirty=true;
@@ -461,7 +478,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
       const route=make('p','assets-recurring-route',path);
       const dates=make('p','assets-recurring-dates',`${item.startOn.replace(/-/g,'/')} ～ ${item.endOn?.replace(/-/g,'/')??'無期限'}`);
       const actions=make('div','assets-recurring-actions');
-      actions.append(addButton('編集',()=>populateForm(item)),addButton('削除',()=>{void removeRecurring(item);},true));
+      actions.append(addButton('編集',()=>{openRecurringEditor(item);}),addButton('削除',()=>{void removeRecurring(item);},true));
       card.append(top,tags,route,dates,actions);list.append(card);
     }
   }
@@ -655,7 +672,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
   $('assets-recurring-form').addEventListener('change',markDirty);
   $<HTMLSelectElement>('assets-recurring-kind').addEventListener('change',updateFormFields);
   $<HTMLSelectElement>('assets-recurring-frequency').addEventListener('change',updateFormFields);
-  $('assets-recurring-clear').addEventListener('click',()=>{resetForm();status($('assets-recurring-status'),'入力をクリアしました。');});
+  $('assets-recurring-clear').addEventListener('click',()=>{if((dirty||editingId!==null)&&!window.confirm('編集中の入力を破棄してクリアしますか？'))return;resetForm();status($('assets-recurring-status'),'入力をクリアしました。');});
   $<HTMLFormElement>('assets-recurring-form').addEventListener('submit',event=>{
     event.preventDefault();if(busy)return;
     void (async()=>{
@@ -688,9 +705,7 @@ export function initAssetsSettings(getVault:()=>LiveVault|null,getCategories:()=
     if(!vault?.unlocked||busy)return false;
     const match=vault.assetSettings().recurring.find(entry=>entry.id===id);
     if(!match)return false;
-    if((dirty||editingId!==null)&&!window.confirm('編集中の入力を破棄して、指定した定期入出金を開きますか？'))return false;
-    populateForm(match);
-    return true;
+    return openRecurringEditor(match);
   },refreshPayroll,payrollSnapshot:()=>{
     const ready=!!getVault()?.unlocked&&payrollSynced&&payrollOwner===getVault();
     return ready?{ready:true,syncedAt:payrollSyncedAt,entries:structuredClone(payrollIncome)}:{ready:false,syncedAt:null,entries:[]};
